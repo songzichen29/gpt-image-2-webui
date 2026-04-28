@@ -1,10 +1,6 @@
 services:
   gpt-image-2-webui:
-    build:
-      context: .
-      args:
-        NEXT_PUBLIC_IMAGE_STORAGE_MODE: ${NEXT_PUBLIC_IMAGE_STORAGE_MODE:-fs}
-    image: gpt-image-2-webui:latest
+    image: tannic666/gpt-image-2-webui:latest
     container_name: gpt-image-2-webui
     restart: unless-stopped
     ports:
