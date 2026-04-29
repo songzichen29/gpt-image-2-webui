@@ -14,11 +14,13 @@ type StreamingEvent = {
     path?: string;
     output_format?: string;
     usage?: OpenAI.Images.ImagesResponse['usage'];
+    revised_prompt?: string;
     images?: Array<{
         filename: string;
         b64_json: string;
         path?: string;
         output_format: string;
+        revised_prompt?: string;
     }>;
     error?: string;
 };
@@ -37,6 +39,77 @@ function getImageRequestTimeoutMs() {
     return DEFAULT_IMAGE_REQUEST_TIMEOUT_MS;
 }
 
+function getPreferredAcceptLanguage(responseLanguage: FormDataEntryValue | null, request: NextRequest): string {
+    if (responseLanguage === 'zh') {
+        return 'zh-CN,zh;q=0.9,en;q=0.8';
+    }
+
+    if (responseLanguage === 'en') {
+        return 'en-US,en;q=0.9,zh-CN;q=0.6';
+    }
+
+    return request.headers.get('accept-language') || 'zh-CN,zh;q=0.9,en;q=0.8';
+}
+
+function withAspectInstruction(
+    prompt: string,
+    size: string | null | undefined,
+    responseLanguage: FormDataEntryValue | null
+) {
+    if (!size || !size.includes('x')) {
+        return prompt;
+    }
+
+    const [width, height] = size.split('x').map((value) => Number.parseInt(value, 10));
+
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        return prompt;
+    }
+
+    const isChinese = responseLanguage === 'zh';
+    const ratioText =
+        width === height
+            ? '1:1'
+            : width > height
+              ? `${Math.round(width / gcd(width, height))}:${Math.round(height / gcd(width, height))}`
+              : `${Math.round(width / gcd(width, height))}:${Math.round(height / gcd(width, height))}`;
+
+    if (width > height) {
+        const instruction = isChinese
+            ? `重要构图要求：必须严格使用 ${size} 的横向宽屏画布（${ratioText}），完整利用整个横向画面；不要改写成手机壁纸、竖屏壁纸、竖版海报或只在中间放一个竖向主体。`
+            : `Important composition requirement: strictly use a ${size} landscape widescreen canvas (${ratioText}); use the full horizontal frame; do not reinterpret it as a phone wallpaper, vertical wallpaper, vertical poster, or a narrow centered subject.`;
+
+        return `${prompt}\n\n${instruction}`;
+    }
+
+    if (height > width) {
+        const instruction = isChinese
+            ? `重要构图要求：必须严格使用 ${size} 的竖向画布（${ratioText}），按竖图构图，不要改写成横向宽屏画面。`
+            : `Important composition requirement: strictly use a ${size} portrait canvas (${ratioText}); compose vertically and do not reinterpret it as a landscape widescreen image.`;
+
+        return `${prompt}\n\n${instruction}`;
+    }
+
+    const instruction = isChinese
+        ? `重要构图要求：必须严格使用 ${size} 的方形画布（1:1），不要改写成横向或竖向壁纸。`
+        : `Important composition requirement: strictly use a ${size} square canvas (1:1); do not reinterpret it as a landscape or portrait wallpaper.`;
+
+    return `${prompt}\n\n${instruction}`;
+}
+
+function gcd(left: number, right: number): number {
+    let a = Math.abs(left);
+    let b = Math.abs(right);
+
+    while (b) {
+        const remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+
+    return a || 1;
+}
+
 // Define valid output formats for type safety
 const VALID_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'] as const;
 type ValidOutputFormat = (typeof VALID_OUTPUT_FORMATS)[number];
@@ -53,6 +126,76 @@ function validateOutputFormat(format: unknown): ValidOutputFormat {
     }
 
     return 'png'; // default fallback
+}
+
+function getRevisedPrompt(source: unknown): string | undefined {
+    if (!source || typeof source !== 'object' || !('revised_prompt' in source)) {
+        return undefined;
+    }
+
+    const revisedPrompt = source.revised_prompt;
+
+    return typeof revisedPrompt === 'string' && revisedPrompt.trim() ? revisedPrompt : undefined;
+}
+
+function mergeNumericUsageValue(left: unknown, right: unknown): unknown {
+    if (typeof left === 'number' && typeof right === 'number') {
+        return left + right;
+    }
+
+    if (left && right && typeof left === 'object' && typeof right === 'object') {
+        const merged: Record<string, unknown> = { ...(left as Record<string, unknown>) };
+
+        for (const [key, value] of Object.entries(right as Record<string, unknown>)) {
+            merged[key] = mergeNumericUsageValue(merged[key], value);
+        }
+
+        return merged;
+    }
+
+    return right ?? left;
+}
+
+function mergeImageUsage(
+    base: OpenAI.Images.ImagesResponse['usage'] | undefined,
+    addition: OpenAI.Images.ImagesResponse['usage'] | undefined
+): OpenAI.Images.ImagesResponse['usage'] | undefined {
+    return mergeNumericUsageValue(base, addition) as OpenAI.Images.ImagesResponse['usage'] | undefined;
+}
+
+async function fillMissingImages(
+    result: OpenAI.Images.ImagesResponse,
+    requestedCount: number,
+    requestSingleImage: (() => Promise<OpenAI.Images.ImagesResponse>) | null
+): Promise<OpenAI.Images.ImagesResponse> {
+    const initialData = result.data ?? [];
+
+    if (!requestSingleImage || requestedCount <= 1 || initialData.length >= requestedCount) {
+        return result;
+    }
+
+    const nextData = [...initialData];
+    let nextUsage = result.usage;
+
+    while (nextData.length < requestedCount) {
+        console.warn(`Image API returned ${nextData.length}/${requestedCount}; requesting one supplemental image.`);
+
+        const supplementalResult = await requestSingleImage();
+        const supplementalImages = supplementalResult.data ?? [];
+
+        if (supplementalImages.length === 0) {
+            break;
+        }
+
+        nextData.push(...supplementalImages);
+        nextUsage = mergeImageUsage(nextUsage, supplementalResult.usage);
+    }
+
+    return {
+        ...result,
+        data: nextData.slice(0, requestedCount),
+        usage: nextUsage
+    };
 }
 
 async function ensureOutputDirExists() {
@@ -122,6 +265,8 @@ export async function POST(request: NextRequest) {
 
         const localApiKey = (formData.get('apiKey') as string | null)?.trim();
         const localBaseUrl = (formData.get('baseUrl') as string | null)?.trim();
+        const responseLanguage = formData.get('responseLanguage');
+        const acceptLanguage = getPreferredAcceptLanguage(responseLanguage, request);
         const apiKey = localApiKey || process.env.OPENAI_API_KEY;
         const baseURL = localBaseUrl || process.env.OPENAI_API_BASE_URL || DEFAULT_API_BASE_URL;
 
@@ -137,9 +282,13 @@ export async function POST(request: NextRequest) {
         const openai = new OpenAI({
             apiKey,
             baseURL: baseURL || undefined,
-            timeout: imageRequestTimeoutMs
+            timeout: imageRequestTimeoutMs,
+            defaultHeaders: {
+                'Accept-Language': acceptLanguage
+            }
         });
         console.log(`OpenAI image request timeout: ${imageRequestTimeoutMs}ms`);
+        console.log(`OpenAI image request language: ${acceptLanguage}`);
 
         const mode = formData.get('mode') as 'generate' | 'edit' | null;
         const prompt = formData.get('prompt') as string | null;
@@ -158,9 +307,12 @@ export async function POST(request: NextRequest) {
         const partialImagesCount = parseInt((formData.get('partial_images') as string) || '2', 10);
 
         let result: OpenAI.Images.ImagesResponse;
+        let requestedImageCount = 1;
+        let requestSingleImage: (() => Promise<OpenAI.Images.ImagesResponse>) | null = null;
 
         if (mode === 'generate') {
             const n = parseInt((formData.get('n') as string) || '1', 10);
+            requestedImageCount = Math.max(1, Math.min(n || 1, 10));
             // gpt-image-2 accepts arbitrary WxH strings that the SDK's narrow literal union doesn't express.
             const size = ((formData.get('size') as string) || '1024x1024') as OpenAI.Images.ImageGenerateParams['size'];
             const quality = (formData.get('quality') as OpenAI.Images.ImageGenerateParams['quality']) || 'auto';
@@ -171,11 +323,12 @@ export async function POST(request: NextRequest) {
                 (formData.get('background') as OpenAI.Images.ImageGenerateParams['background']) || 'auto';
             const moderation =
                 (formData.get('moderation') as OpenAI.Images.ImageGenerateParams['moderation']) || 'auto';
+            const promptWithAspectInstruction = withAspectInstruction(prompt, size, responseLanguage);
 
             const baseParams = {
                 model,
-                prompt,
-                n: Math.max(1, Math.min(n || 1, 10)),
+                prompt: promptWithAspectInstruction,
+                n: requestedImageCount,
                 size,
                 quality,
                 output_format,
@@ -215,6 +368,7 @@ export async function POST(request: NextRequest) {
                                 b64_json: string;
                                 path?: string;
                                 output_format: string;
+                                revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
@@ -231,6 +385,7 @@ export async function POST(request: NextRequest) {
                                 } else if (event.type === 'image_generation.completed') {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
+                                    const revisedPrompt = getRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && event.b64_json) {
@@ -244,6 +399,7 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: event.b64_json || '',
                                         output_format: fileExtension,
+                                        ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
                                         ...(effectiveStorageMode === 'fs' ? { path: `/api/image/${filename}` } : {})
                                     };
                                     completedImages.push(imageData);
@@ -254,7 +410,8 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: event.b64_json,
                                         path: effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined,
-                                        output_format: fileExtension
+                                        output_format: fileExtension,
+                                        revised_prompt: revisedPrompt
                                     };
                                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(completedEvent)}\n\n`));
 
@@ -271,6 +428,7 @@ export async function POST(request: NextRequest) {
                             const doneEvent: StreamingEvent = {
                                 type: 'done',
                                 images: completedImages,
+                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
@@ -297,10 +455,12 @@ export async function POST(request: NextRequest) {
             }
 
             const params: OpenAI.Images.ImageGenerateParams = baseParams;
+            requestSingleImage = () => openai.images.generate({ ...params, n: 1 });
             console.log('Calling OpenAI generate with params:', params);
             result = await openai.images.generate(params);
         } else if (mode === 'edit') {
             const n = parseInt((formData.get('n') as string) || '1', 10);
+            requestedImageCount = Math.max(1, Math.min(n || 1, 10));
             // gpt-image-2 accepts arbitrary WxH strings that the SDK's narrow literal union doesn't express.
             const size = ((formData.get('size') as string) || 'auto') as OpenAI.Images.ImageEditParams['size'];
             const quality = (formData.get('quality') as OpenAI.Images.ImageEditParams['quality']) || 'auto';
@@ -320,9 +480,9 @@ export async function POST(request: NextRequest) {
 
             const baseEditParams = {
                 model,
-                prompt,
+                prompt: withAspectInstruction(prompt, size === 'auto' ? undefined : size, responseLanguage),
                 image: imageFiles,
-                n: Math.max(1, Math.min(n || 1, 10)),
+                n: requestedImageCount,
                 size: size === 'auto' ? undefined : size,
                 quality: quality === 'auto' ? undefined : quality
             };
@@ -359,6 +519,7 @@ export async function POST(request: NextRequest) {
                                 b64_json: string;
                                 path?: string;
                                 output_format: string;
+                                revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
@@ -375,6 +536,7 @@ export async function POST(request: NextRequest) {
                                 } else if (event.type === 'image_edit.completed') {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
+                                    const revisedPrompt = getRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && event.b64_json) {
@@ -388,6 +550,7 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: event.b64_json || '',
                                         output_format: fileExtension,
+                                        ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
                                         ...(effectiveStorageMode === 'fs' ? { path: `/api/image/${filename}` } : {})
                                     };
                                     completedImages.push(imageData);
@@ -398,7 +561,8 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: event.b64_json,
                                         path: effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined,
-                                        output_format: fileExtension
+                                        output_format: fileExtension,
+                                        revised_prompt: revisedPrompt
                                     };
                                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(completedEvent)}\n\n`));
 
@@ -415,6 +579,7 @@ export async function POST(request: NextRequest) {
                             const doneEvent: StreamingEvent = {
                                 type: 'done',
                                 images: completedImages,
+                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
@@ -444,6 +609,7 @@ export async function POST(request: NextRequest) {
                 ...baseEditParams,
                 ...(maskFile ? { mask: maskFile } : {})
             };
+            requestSingleImage = () => openai.images.edit({ ...params, n: 1 });
 
             console.log('Calling OpenAI edit with params:', {
                 ...params,
@@ -456,6 +622,8 @@ export async function POST(request: NextRequest) {
         }
 
         console.log('OpenAI API call successful.');
+
+        result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
 
         if (!result || !Array.isArray(result.data) || result.data.length === 0) {
             console.error('Invalid or empty data received from OpenAI API:', result);
@@ -482,10 +650,18 @@ export async function POST(request: NextRequest) {
                 } else {
                 }
 
-                const imageResult: { filename: string; b64_json: string; path?: string; output_format: string } = {
+                const revisedPrompt = getRevisedPrompt(imageData);
+                const imageResult: {
+                    filename: string;
+                    b64_json: string;
+                    path?: string;
+                    output_format: string;
+                    revised_prompt?: string;
+                } = {
                     filename: filename,
                     b64_json: imageData.b64_json,
-                    output_format: fileExtension
+                    output_format: fileExtension,
+                    ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {})
                 };
 
                 if (effectiveStorageMode === 'fs') {
@@ -498,7 +674,11 @@ export async function POST(request: NextRequest) {
 
         console.log(`All images processed. Mode: ${effectiveStorageMode}`);
 
-        return NextResponse.json({ images: savedImagesData, usage: result.usage });
+        return NextResponse.json({
+            images: savedImagesData,
+            revised_prompt: savedImagesData.find((image) => image.revised_prompt)?.revised_prompt,
+            usage: result.usage
+        });
     } catch (error: unknown) {
         console.error('Error in /api/images:', error);
 

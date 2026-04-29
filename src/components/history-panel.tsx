@@ -35,7 +35,7 @@ import * as React from 'react';
 
 type HistoryPanelProps = {
     history: HistoryMetadata[];
-    onSelectImage: (item: HistoryMetadata) => void;
+    onSelectImage: (item: HistoryMetadata, imageIndex?: number) => void;
     onClearHistory: () => void;
     getImageSrc: (filename: string) => string | undefined;
     isImageCacheReady: boolean;
@@ -247,7 +247,7 @@ function HistoryPanelImpl({
                                     <div className='flex items-start justify-between gap-2'>
                                         <button
                                             type='button'
-                                            onClick={() => onSelectImage(item)}
+                                            onClick={() => onSelectImage(item, 0)}
                                             className='min-w-0 flex-1 text-left'
                                             aria-label={t('history.viewBatchAria', { date: generatedDate })}>
                                             <p className='truncate text-sm font-medium text-white/90'>
@@ -267,7 +267,7 @@ function HistoryPanelImpl({
                                             <button
                                                 key={imageInfo.filename}
                                                 type='button'
-                                                onClick={() => onSelectImage(item)}
+                                                onClick={() => onSelectImage(item, imageInfo.index)}
                                                 className='relative aspect-square overflow-hidden rounded-md border border-white/15 bg-neutral-900 focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-black focus:outline-none'
                                                 aria-label={t('history.viewImageAria', {
                                                     filename: imageInfo.filename

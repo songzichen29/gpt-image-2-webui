@@ -22,6 +22,7 @@ import * as React from 'react';
 
 type HistoryImage = {
     filename: string;
+    revisedPrompt?: string;
 };
 
 export type HistoryMetadata = {
@@ -33,6 +34,7 @@ export type HistoryMetadata = {
     background: GenerationFormData['background'];
     moderation: GenerationFormData['moderation'];
     prompt: string;
+    revisedPrompt?: string;
     mode: 'generate' | 'edit';
     costDetails: CostDetails | null;
     size?: string;
@@ -78,10 +80,26 @@ type ApiImageResponseItem = {
     b64_json?: string;
     output_format: string;
     path?: string;
+    revised_prompt?: string;
+};
+
+type ImageBatchItem = {
+    path: string;
+    filename: string;
+    revisedPrompt?: string;
+};
+
+type ApiUsageForCost = Parameters<typeof calculateApiCost>[0];
+
+type ImageApiResult = {
+    images?: ApiImageResponseItem[];
+    revised_prompt?: string;
+    usage?: ApiUsageForCost;
+    error?: string;
 };
 
 export default function HomePage() {
-    const { languagePreference, setLanguagePreference, t } = useI18n();
+    const { language, languagePreference, setLanguagePreference, t } = useI18n();
     const { settings, saveSettings } = useAppSettings();
     const { resolvedTheme, setTheme } = useTheme();
     const [isThemeMounted, setIsThemeMounted] = React.useState(false);
@@ -95,7 +113,8 @@ export default function HomePage() {
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
     const [error, setError] = React.useState<string | null>(null);
-    const [latestImageBatch, setLatestImageBatch] = React.useState<{ path: string; filename: string }[] | null>(null);
+    const [latestImageBatch, setLatestImageBatch] = React.useState<ImageBatchItem[] | null>(null);
+    const [latestBatchPrompt, setLatestBatchPrompt] = React.useState('');
     const [imageOutputView, setImageOutputView] = React.useState<'grid' | number>('grid');
     const [history, setHistory] = React.useState<HistoryMetadata[]>([]);
     const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
@@ -142,6 +161,17 @@ export default function HomePage() {
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
 
     const editModel = 'gpt-image-2' as EditingFormData['model'];
+
+    const normalizeRevisedPrompt = React.useCallback((value: unknown): string | undefined => {
+        return typeof value === 'string' && value.trim() ? value : undefined;
+    }, []);
+
+    const getBatchRevisedPrompt = React.useCallback(
+        (images: ApiImageResponseItem[], fallback?: unknown): string | undefined =>
+            normalizeRevisedPrompt(fallback) ??
+            images.map((image) => normalizeRevisedPrompt(image.revised_prompt)).find(Boolean),
+        [normalizeRevisedPrompt]
+    );
 
     React.useEffect(() => {
         setIsThemeMounted(true);
@@ -409,9 +439,7 @@ export default function HomePage() {
         return 'image/png';
     };
 
-    const cacheApiImageForDisplay = async (
-        img: ApiImageResponseItem
-    ): Promise<{ path: string; filename: string } | null> => {
+    const cacheApiImageForDisplay = async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
         if (img.b64_json) {
             try {
                 const byteCharacters = atob(img.b64_json);
@@ -438,7 +466,11 @@ export default function HomePage() {
                     [img.filename]: blobUrl
                 }));
 
-                return { filename: img.filename, path: blobUrl };
+                return {
+                    filename: img.filename,
+                    path: blobUrl,
+                    revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
+                };
             } catch (dbError) {
                 console.error(`Error caching blob ${img.filename} to IndexedDB:`, dbError);
                 if (effectiveStorageModeClient === 'indexeddb') {
@@ -451,7 +483,11 @@ export default function HomePage() {
         }
 
         if (img.path) {
-            return { filename: img.filename, path: img.path };
+            return {
+                filename: img.filename,
+                path: img.path,
+                revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
+            };
         }
 
         return null;
@@ -466,6 +502,7 @@ export default function HomePage() {
         setElapsedSeconds(0);
         setError(null);
         setLatestImageBatch(null);
+        setLatestBatchPrompt('');
         setImageOutputView('grid');
 
         const apiFormData = new FormData();
@@ -476,6 +513,7 @@ export default function HomePage() {
             apiFormData.append('apiKey', apiKey);
         }
         apiFormData.append('baseUrl', baseUrl);
+        apiFormData.append('responseLanguage', language);
 
         if (isPasswordRequiredByBackend && clientPasswordHash) {
             apiFormData.append('passwordHash', clientPasswordHash);
@@ -601,13 +639,18 @@ export default function HomePage() {
                                         }
 
                                         const currentModel = mode === 'generate' ? genModel : editModel;
+                                        const eventImages = event.images as ApiImageResponseItem[];
+                                        const revisedPrompt = getBatchRevisedPrompt(eventImages, event.revised_prompt);
                                         const costDetails = calculateApiCost(event.usage, currentModel);
 
                                         const batchTimestamp = Date.now();
                                         const newHistoryEntry: HistoryMetadata = {
                                             timestamp: batchTimestamp,
-                                            images: event.images.map((img: { filename: string }) => ({
-                                                filename: img.filename
+                                            images: eventImages.map((img) => ({
+                                                filename: img.filename,
+                                                ...(normalizeRevisedPrompt(img.revised_prompt)
+                                                    ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
+                                                    : {})
                                             })),
                                             storageModeUsed: effectiveStorageModeClient,
                                             durationMs: durationMs,
@@ -616,6 +659,7 @@ export default function HomePage() {
                                             moderation: historyModeration,
                                             output_format: historyOutputFormat,
                                             prompt: historyPrompt,
+                                            revisedPrompt,
                                             mode: mode,
                                             costDetails: costDetails,
                                             model: currentModel,
@@ -626,19 +670,17 @@ export default function HomePage() {
                                             hasMask: requestHasMask
                                         };
 
-                                        const newImageBatchPromises = event.images.map((img: ApiImageResponseItem) =>
+                                        const newImageBatchPromises = eventImages.map((img) =>
                                             cacheApiImageForDisplay(img)
                                         );
 
                                         const processedImages = (await Promise.all(newImageBatchPromises)).filter(
                                             Boolean
-                                        ) as {
-                                            path: string;
-                                            filename: string;
-                                        }[];
+                                        ) as ImageBatchItem[];
 
                                         setLatestImageBatch(processedImages);
-                                        setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
+                                        setLatestBatchPrompt(historyPrompt);
+                                        setImageOutputView(processedImages.length > 0 ? 0 : 'grid');
 
                                         setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
                                     }
@@ -654,7 +696,7 @@ export default function HomePage() {
             }
 
             // Non-streaming response handling (original code)
-            const result = await response.json();
+            const result: ImageApiResult = await response.json();
 
             if (!response.ok) {
                 if (response.status === 401 && isPasswordRequiredByBackend) {
@@ -692,12 +734,18 @@ export default function HomePage() {
                 }
 
                 const currentModel = mode === 'generate' ? genModel : editModel;
+                const revisedPrompt = getBatchRevisedPrompt(result.images, result.revised_prompt);
                 const costDetails = calculateApiCost(result.usage, currentModel);
 
                 const batchTimestamp = Date.now();
                 const newHistoryEntry: HistoryMetadata = {
                     timestamp: batchTimestamp,
-                    images: result.images.map((img: { filename: string }) => ({ filename: img.filename })),
+                    images: result.images.map((img) => ({
+                        filename: img.filename,
+                        ...(normalizeRevisedPrompt(img.revised_prompt)
+                            ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
+                            : {})
+                    })),
                     storageModeUsed: effectiveStorageModeClient,
                     durationMs: durationMs,
                     quality: historyQuality,
@@ -705,6 +753,7 @@ export default function HomePage() {
                     moderation: historyModeration,
                     output_format: historyOutputFormat,
                     prompt: historyPrompt,
+                    revisedPrompt,
                     mode: mode,
                     costDetails: costDetails,
                     model: currentModel,
@@ -719,17 +768,16 @@ export default function HomePage() {
                     cacheApiImageForDisplay(img)
                 );
 
-                const processedImages = (await Promise.all(newImageBatchPromises)).filter(Boolean) as {
-                    path: string;
-                    filename: string;
-                }[];
+                const processedImages = (await Promise.all(newImageBatchPromises)).filter(Boolean) as ImageBatchItem[];
 
                 setLatestImageBatch(processedImages);
-                setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
+                setLatestBatchPrompt(historyPrompt);
+                setImageOutputView(processedImages.length > 0 ? 0 : 'grid');
 
                 setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
             } else {
                 setLatestImageBatch(null);
+                setLatestBatchPrompt('');
                 throw new Error(t('page.apiNoImages'));
             }
         } catch (err: unknown) {
@@ -738,6 +786,7 @@ export default function HomePage() {
             const errorMessage = err instanceof Error ? err.message : t('page.unexpectedError');
             setError(errorMessage);
             setLatestImageBatch(null);
+            setLatestBatchPrompt('');
         } finally {
             if (durationMs === 0) durationMs = Date.now() - startTime;
             setIsLoading(false);
@@ -746,7 +795,7 @@ export default function HomePage() {
     };
 
     const handleHistorySelect = React.useCallback(
-        (item: HistoryMetadata) => {
+        (item: HistoryMetadata, imageIndex = 0) => {
             const selectedBatchPromises = item.images.map(async (imgInfo) => {
                 const originalStorageMode = item.storageModeUsed || 'fs';
                 const path =
@@ -754,7 +803,7 @@ export default function HomePage() {
                     (originalStorageMode === 'fs' && isImageCacheReady ? `/api/image/${imgInfo.filename}` : undefined);
 
                 if (path) {
-                    return { path, filename: imgInfo.filename };
+                    return { path, filename: imgInfo.filename, revisedPrompt: imgInfo.revisedPrompt };
                 } else {
                     console.warn(
                         `Could not get image source for history item: ${imgInfo.filename} (mode: ${originalStorageMode})`
@@ -765,7 +814,11 @@ export default function HomePage() {
             });
 
             Promise.all(selectedBatchPromises).then((resolvedBatch) => {
-                const validImages = resolvedBatch.filter(Boolean) as { path: string; filename: string }[];
+                const validImages = resolvedBatch.filter(Boolean) as ImageBatchItem[];
+                const selectedFilename = item.images[imageIndex]?.filename;
+                const selectedValidIndex = selectedFilename
+                    ? validImages.findIndex((image) => image.filename === selectedFilename)
+                    : -1;
 
                 if (validImages.length !== item.images.length) {
                     setError(t('page.historyImagesLoadSomeError'));
@@ -774,7 +827,8 @@ export default function HomePage() {
                 }
 
                 setLatestImageBatch(validImages.length > 0 ? validImages : null);
-                setImageOutputView(validImages.length > 1 ? 'grid' : 0);
+                setLatestBatchPrompt(validImages.length > 0 ? item.prompt : '');
+                setImageOutputView(validImages.length > 0 ? Math.max(0, selectedValidIndex) : 'grid');
             });
         },
         [getImageSrc, isImageCacheReady, t]
@@ -789,6 +843,7 @@ export default function HomePage() {
         if (window.confirm(confirmationMessage)) {
             setHistory([]);
             setLatestImageBatch(null);
+            setLatestBatchPrompt('');
             setImageOutputView('grid');
             setError(null);
 
@@ -1157,6 +1212,7 @@ export default function HomePage() {
                         <div className='min-h-0 flex-1'>
                             <ImageOutput
                                 imageBatch={latestImageBatch}
+                                promptText={latestBatchPrompt}
                                 viewMode={imageOutputView}
                                 onViewChange={setImageOutputView}
                                 altText={t('output.generatedAlt')}

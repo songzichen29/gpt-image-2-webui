@@ -4,17 +4,19 @@ import { ImagePreviewDialog, type PreviewImage } from '@/components/image-previe
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
-import { Download, Grid, Loader2, Send } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Grid, Loader2, Send } from 'lucide-react';
 import Image from 'next/image';
 import * as React from 'react';
 
 type ImageInfo = {
     path: string;
     filename: string;
+    revisedPrompt?: string;
 };
 
 type ImageOutputProps = {
     imageBatch: ImageInfo[] | null;
+    promptText?: string;
     viewMode: 'grid' | number;
     onViewChange: (view: 'grid' | number) => void;
     altText?: string;
@@ -41,6 +43,7 @@ const formatElapsedTime = (elapsedSeconds: number): string => {
 
 export function ImageOutput({
     imageBatch,
+    promptText,
     viewMode,
     onViewChange,
     altText = 'Generated image output',
@@ -52,8 +55,20 @@ export function ImageOutput({
 }: ImageOutputProps) {
     const { t } = useI18n();
     const [previewImage, setPreviewImage] = React.useState<PreviewImage | null>(null);
+    const [promptView, setPromptView] = React.useState<'original' | 'revised'>('original');
     const elapsedLabel = t('output.elapsed', { time: formatElapsedTime(elapsedSeconds) });
     const selectedImage = typeof viewMode === 'number' && imageBatch ? imageBatch[viewMode] : null;
+    const originalPrompt = promptText?.trim();
+    const revisedPrompt = selectedImage?.revisedPrompt?.trim();
+    const activePromptKind =
+        promptView === 'revised' && revisedPrompt ? 'revised' : originalPrompt ? 'original' : 'revised';
+    const activePrompt = activePromptKind === 'revised' ? revisedPrompt || '' : originalPrompt || '';
+    const activePromptTitle =
+        activePromptKind === 'revised' ? t('output.revisedPromptTitle') : t('output.originalPromptTitle');
+
+    React.useEffect(() => {
+        setPromptView('original');
+    }, [selectedImage?.filename, promptText]);
 
     const handleSendClick = () => {
         // Send to edit only works when a single image is selected
@@ -79,6 +94,17 @@ export function ImageOutput({
     const isSingleImageView = typeof viewMode === 'number';
     const canSendToEdit = !isLoading && isSingleImageView && imageBatch && imageBatch[viewMode];
     const singleActionClass = showCarousel && viewMode === 'grid' ? 'invisible' : 'visible';
+    const selectedIndex = typeof viewMode === 'number' ? viewMode : 0;
+
+    const goToPreviousImage = () => {
+        if (!imageBatch?.length) return;
+        onViewChange((selectedIndex - 1 + imageBatch.length) % imageBatch.length);
+    };
+
+    const goToNextImage = () => {
+        if (!imageBatch?.length) return;
+        onViewChange((selectedIndex + 1) % imageBatch.length);
+    };
 
     return (
         <div className='flex h-full min-h-[300px] w-full flex-col items-center justify-between gap-4 overflow-hidden rounded-lg border border-white/20 bg-black p-4'>
@@ -153,20 +179,47 @@ export function ImageOutput({
                             ))}
                         </div>
                     ) : imageBatch[viewMode] ? (
-                        <button
-                            type='button'
-                            className='flex h-full w-full cursor-zoom-in items-center justify-center'
-                            onClick={() => openPreview(imageBatch[viewMode])}
-                            aria-label={t('output.previewImageAria', { filename: imageBatch[viewMode].filename })}>
-                            <Image
-                                src={imageBatch[viewMode].path}
-                                alt={altText}
-                                width={512}
-                                height={512}
-                                className='max-h-full max-w-full object-contain'
-                                unoptimized
-                            />
-                        </button>
+                        <>
+                            <button
+                                type='button'
+                                className='flex h-full w-full cursor-zoom-in items-center justify-center'
+                                onClick={() => openPreview(imageBatch[viewMode])}
+                                aria-label={t('output.previewImageAria', { filename: imageBatch[viewMode].filename })}>
+                                <Image
+                                    src={imageBatch[viewMode].path}
+                                    alt={altText}
+                                    width={512}
+                                    height={512}
+                                    className='max-h-full max-w-full object-contain'
+                                    unoptimized
+                                />
+                            </button>
+                            {showCarousel && (
+                                <>
+                                    <Button
+                                        type='button'
+                                        variant='ghost'
+                                        size='icon'
+                                        onClick={goToPreviousImage}
+                                        className='absolute top-1/2 left-2 h-9 w-9 -translate-y-1/2 rounded-full bg-black/70 text-white/80 hover:bg-black/90 hover:text-white'
+                                        aria-label={t('output.previousImageAria')}>
+                                        <ChevronLeft className='h-5 w-5' />
+                                    </Button>
+                                    <Button
+                                        type='button'
+                                        variant='ghost'
+                                        size='icon'
+                                        onClick={goToNextImage}
+                                        className='absolute top-1/2 right-2 h-9 w-9 -translate-y-1/2 rounded-full bg-black/70 text-white/80 hover:bg-black/90 hover:text-white'
+                                        aria-label={t('output.nextImageAria')}>
+                                        <ChevronRight className='h-5 w-5' />
+                                    </Button>
+                                    <div className='absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-2 py-1 text-xs text-white/75'>
+                                        {viewMode + 1}/{imageBatch.length}
+                                    </div>
+                                </>
+                            )}
+                        </>
                     ) : (
                         <div className='text-center text-white/40'>
                             <p>{t('output.displayError')}</p>
@@ -178,6 +231,41 @@ export function ImageOutput({
                     </div>
                 )}
             </div>
+
+            {selectedImage && activePrompt && (
+                <div className='max-h-20 w-full shrink-0 overflow-y-auto rounded-md border border-white/10 bg-white/[0.035] p-2 text-xs text-white/70'>
+                    <div className='mb-1 flex items-center justify-between gap-2'>
+                        <p className='font-medium text-white/85'>{activePromptTitle}</p>
+                        {originalPrompt && revisedPrompt && (
+                            <div className='flex rounded border border-white/10 p-0.5'>
+                                <button
+                                    type='button'
+                                    onClick={() => setPromptView('original')}
+                                    className={cn(
+                                        'rounded px-1.5 py-0.5 text-[11px]',
+                                        promptView === 'original'
+                                            ? 'bg-white/15 text-white'
+                                            : 'text-white/45 hover:text-white/75'
+                                    )}>
+                                    {t('output.originalPromptTitle')}
+                                </button>
+                                <button
+                                    type='button'
+                                    onClick={() => setPromptView('revised')}
+                                    className={cn(
+                                        'rounded px-1.5 py-0.5 text-[11px]',
+                                        promptView === 'revised'
+                                            ? 'bg-white/15 text-white'
+                                            : 'text-white/45 hover:text-white/75'
+                                    )}>
+                                    {t('output.revisedPromptTitle')}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                    <p className='whitespace-pre-wrap'>{activePrompt}</p>
+                </div>
+            )}
 
             <div className='flex h-10 w-full shrink-0 items-center justify-center gap-4'>
                 {showCarousel && (

@@ -30,6 +30,7 @@ export default function HistoryDetailPage() {
     const [item, setItem] = React.useState<HistoryMetadata | null | undefined>(undefined);
     const [selectedImageIndex, setSelectedImageIndex] = React.useState(0);
     const [copiedPrompt, setCopiedPrompt] = React.useState(false);
+    const [copiedRevisedPrompt, setCopiedRevisedPrompt] = React.useState(false);
     const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
     const [now, setNow] = React.useState(() => Date.now());
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
@@ -118,6 +119,16 @@ export default function HistoryDetailPage() {
         }
     };
 
+    const handleCopyRevisedPrompt = async (revisedPrompt: string) => {
+        try {
+            await navigator.clipboard.writeText(revisedPrompt);
+            setCopiedRevisedPrompt(true);
+            window.setTimeout(() => setCopiedRevisedPrompt(false), 1500);
+        } catch (error) {
+            console.error('Failed to copy revised prompt:', error);
+        }
+    };
+
     if (item === undefined) {
         return (
             <main className='flex h-screen items-center justify-center overflow-hidden bg-black p-4 text-white'>
@@ -159,6 +170,7 @@ export default function HistoryDetailPage() {
         src: imageSrcByFilename[imageInfo.filename]
     }));
     const selectedImage = images[selectedImageIndex] ?? images[0];
+    const selectedRevisedPrompt = selectedImage?.revisedPrompt ?? item.revisedPrompt;
 
     const detailRows: Array<[string, React.ReactNode]> = [
         [t('history.createdAt'), generatedAt],
@@ -326,6 +338,39 @@ export default function HistoryDetailPage() {
                                     {item.prompt || t('history.noPrompt')}
                                 </div>
                             </section>
+
+                            {selectedRevisedPrompt && (
+                                <section className='rounded-md border border-emerald-300/20 bg-emerald-300/10 p-3'>
+                                    <div className='mb-2 flex items-center justify-between gap-3'>
+                                        <div className='min-w-0'>
+                                            <h2 className='text-sm font-medium text-white'>
+                                                {t('history.revisedPromptTitle')}
+                                            </h2>
+                                            {imageCount > 1 && selectedImage && (
+                                                <p className='mt-0.5 truncate text-[11px] text-white/45'>
+                                                    {selectedImage.index + 1}/{imageCount} · {selectedImage.filename}
+                                                </p>
+                                            )}
+                                        </div>
+                                        <Button
+                                            type='button'
+                                            variant='outline'
+                                            size='sm'
+                                            onClick={() => handleCopyRevisedPrompt(selectedRevisedPrompt)}
+                                            className='h-7 border-white/20 px-2 text-xs text-white/80 hover:bg-white/10 hover:text-white'>
+                                            {copiedRevisedPrompt ? (
+                                                <Check className='h-3.5 w-3.5 text-green-400' />
+                                            ) : (
+                                                <Copy className='h-3.5 w-3.5' />
+                                            )}
+                                            {copiedRevisedPrompt ? t('common.copied') : t('common.copy')}
+                                        </Button>
+                                    </div>
+                                    <div className='max-h-44 overflow-y-auto rounded border border-white/5 bg-black/25 p-2 text-xs whitespace-pre-wrap text-white/75'>
+                                        {selectedRevisedPrompt}
+                                    </div>
+                                </section>
+                            )}
 
                             <section
                                 className={cn(
