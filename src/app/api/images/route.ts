@@ -25,6 +25,17 @@ type StreamingEvent = {
 
 const outputDir = path.resolve(process.cwd(), 'generated-images');
 const DEFAULT_API_BASE_URL = 'https://api.774966.xyz/v1';
+const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
+
+function getImageRequestTimeoutMs() {
+    const configuredTimeout = Number.parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS || '', 10);
+
+    if (Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
+        return configuredTimeout;
+    }
+
+    return DEFAULT_IMAGE_REQUEST_TIMEOUT_MS;
+}
 
 // Define valid output formats for type safety
 const VALID_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'] as const;
@@ -122,10 +133,13 @@ export async function POST(request: NextRequest) {
             );
         }
 
+        const imageRequestTimeoutMs = getImageRequestTimeoutMs();
         const openai = new OpenAI({
             apiKey,
-            baseURL: baseURL || undefined
+            baseURL: baseURL || undefined,
+            timeout: imageRequestTimeoutMs
         });
+        console.log(`OpenAI image request timeout: ${imageRequestTimeoutMs}ms`);
 
         const mode = formData.get('mode') as 'generate' | 'edit' | null;
         const prompt = formData.get('prompt') as string | null;

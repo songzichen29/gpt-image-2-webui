@@ -31,7 +31,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             status: 200,
             headers: {
                 'Content-Type': contentType,
-                'Content-Length': fileBuffer.length.toString()
+                'Content-Length': fileBuffer.length.toString(),
+                'Cache-Control': 'private, max-age=31536000, immutable'
             }
         });
     } catch (error: unknown) {

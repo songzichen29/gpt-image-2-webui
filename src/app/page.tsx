@@ -4,18 +4,20 @@ import { EditingForm, type EditingFormData } from '@/components/editing-form';
 import { GenerationForm, type GenerationFormData } from '@/components/generation-form';
 import { HistoryPanel } from '@/components/history-panel';
 import { ImageOutput } from '@/components/image-output';
-import { LanguageSelect } from '@/components/language-select';
 import { PasswordDialog } from '@/components/password-dialog';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { defaultApiBaseUrl, useAppSettings } from '@/lib/app-settings';
 import { calculateApiCost, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
 import { db, type ImageRecord } from '@/lib/db';
-import { useI18n } from '@/lib/i18n';
+import { useI18n, type LanguagePreference } from '@/lib/i18n';
 import { getPresetDimensions } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Settings } from 'lucide-react';
-import Link from 'next/link';
+import { CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, Languages, Moon, Sun } from 'lucide-react';
+import { useTheme } from 'next-themes';
 import * as React from 'react';
 
 type HistoryImage = {
@@ -79,11 +81,15 @@ type ApiImageResponseItem = {
 };
 
 export default function HomePage() {
-    const { t } = useI18n();
-    const { settings, modelOptions } = useAppSettings();
+    const { languagePreference, setLanguagePreference, t } = useI18n();
+    const { settings, saveSettings } = useAppSettings();
+    const { resolvedTheme, setTheme } = useTheme();
+    const [isThemeMounted, setIsThemeMounted] = React.useState(false);
     const [mode, setMode] = React.useState<'generate' | 'edit'>('generate');
     const [isPasswordRequiredByBackend, setIsPasswordRequiredByBackend] = React.useState<boolean | null>(null);
     const [clientPasswordHash, setClientPasswordHash] = React.useState<string | null>(null);
+    const [apiKeyDraft, setApiKeyDraft] = React.useState(settings.apiKey);
+    const [showApiKey, setShowApiKey] = React.useState(false);
     const [isLoading, setIsLoading] = React.useState(false);
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
@@ -92,6 +98,7 @@ export default function HomePage() {
     const [latestImageBatch, setLatestImageBatch] = React.useState<{ path: string; filename: string }[] | null>(null);
     const [imageOutputView, setImageOutputView] = React.useState<'grid' | number>('grid');
     const [history, setHistory] = React.useState<HistoryMetadata[]>([]);
+    const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
     const [isInitialLoad, setIsInitialLoad] = React.useState(true);
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
     const [isPasswordDialogOpen, setIsPasswordDialogOpen] = React.useState(false);
@@ -102,6 +109,7 @@ export default function HomePage() {
     const [dialogCheckboxStateSkipConfirm, setDialogCheckboxStateSkipConfirm] = React.useState<boolean>(false);
 
     const allDbImages = useLiveQuery<ImageRecord[] | undefined>(() => db.images.toArray(), []);
+    const isImageCacheReady = allDbImages !== undefined;
 
     const [editImageFiles, setEditImageFiles] = React.useState<File[]>([]);
     const [editSourceImagePreviewUrls, setEditSourceImagePreviewUrls] = React.useState<string[]>([]);
@@ -121,7 +129,7 @@ export default function HomePage() {
     const [editDrawnPoints, setEditDrawnPoints] = React.useState<DrawnPoint[]>([]);
     const [editMaskPreviewUrl, setEditMaskPreviewUrl] = React.useState<string | null>(null);
 
-    const [genModel, setGenModel] = React.useState<GenerationFormData['model']>('gpt-image-2');
+    const genModel = 'gpt-image-2' as GenerationFormData['model'];
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
     const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('square');
@@ -133,26 +141,30 @@ export default function HomePage() {
     const [genBackground, setGenBackground] = React.useState<GenerationFormData['background']>('auto');
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
 
-    const [editModel, setEditModel] = React.useState<EditingFormData['model']>('gpt-image-2');
-    const fallbackModel = modelOptions[0] ?? 'gpt-image-2';
-
-    // Streaming state (shared between generate and edit modes)
-    const [enableStreaming, setEnableStreaming] = React.useState(false);
-    const [partialImages, setPartialImages] = React.useState<1 | 2 | 3>(2);
-    // Streaming preview images (base64 data URLs for partial images during streaming)
-    const [streamingPreviewImages, setStreamingPreviewImages] = React.useState<Map<number, string>>(new Map());
+    const editModel = 'gpt-image-2' as EditingFormData['model'];
 
     React.useEffect(() => {
-        if (!modelOptions.includes(genModel)) {
-            setGenModel(fallbackModel);
-        }
-    }, [fallbackModel, genModel, modelOptions]);
+        setIsThemeMounted(true);
+    }, []);
 
     React.useEffect(() => {
-        if (!modelOptions.includes(editModel)) {
-            setEditModel(fallbackModel);
-        }
-    }, [editModel, fallbackModel, modelOptions]);
+        setApiKeyDraft(settings.apiKey);
+    }, [settings.apiKey]);
+
+    const currentTheme = isThemeMounted ? (resolvedTheme ?? 'dark') : 'dark';
+
+    const handleThemeToggle = () => {
+        setTheme(currentTheme === 'dark' ? 'light' : 'dark');
+    };
+
+    const handleApiKeyChange = (value: string) => {
+        setApiKeyDraft(value);
+        saveSettings({
+            ...settings,
+            baseUrl: '',
+            apiKey: value
+        });
+    };
 
     React.useEffect(() => {
         if (!isLoading || activeRequestStartedAt === null) {
@@ -170,27 +182,49 @@ export default function HomePage() {
     }, [activeRequestStartedAt, isLoading]);
 
     const getImageSrc = React.useCallback(
-        (filename: string): string | undefined => {
-            const cached = blobUrlCacheRef.current.get(filename);
-            if (cached) return cached;
-
-            const record = allDbImages?.find((img) => img.filename === filename);
-            if (record?.blob) {
-                const url = URL.createObjectURL(record.blob);
-                blobUrlCacheRef.current.set(filename, url);
-                return url;
-            }
-
-            return undefined;
-        },
-        [allDbImages]
+        (filename: string): string | undefined => imageSrcByFilename[filename],
+        [imageSrcByFilename]
     );
 
     React.useEffect(() => {
-        const cache = blobUrlCacheRef.current;
+        if (allDbImages === undefined) {
+            setImageSrcByFilename({});
+            return;
+        }
+
+        const previousCache = blobUrlCacheRef.current;
+        const nextCache = new Map<string, string>();
+        const nextSrcByFilename: Record<string, string> = {};
+
+        allDbImages.forEach((record) => {
+            if (!record.blob) return;
+
+            const cachedUrl = previousCache.get(record.filename);
+            if (cachedUrl) {
+                nextCache.set(record.filename, cachedUrl);
+                nextSrcByFilename[record.filename] = cachedUrl;
+                return;
+            }
+
+            const url = URL.createObjectURL(record.blob);
+            nextCache.set(record.filename, url);
+            nextSrcByFilename[record.filename] = url;
+        });
+
+        previousCache.forEach((url, filename) => {
+            if (!nextCache.has(filename)) {
+                URL.revokeObjectURL(url);
+            }
+        });
+
+        blobUrlCacheRef.current = nextCache;
+        setImageSrcByFilename(nextSrcByFilename);
+    }, [allDbImages]);
+
+    React.useEffect(() => {
         return () => {
-            cache.forEach((url) => URL.revokeObjectURL(url));
-            cache.clear();
+            blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+            blobUrlCacheRef.current.clear();
         };
     }, []);
 
@@ -200,24 +234,52 @@ export default function HomePage() {
         };
     }, [editSourceImagePreviewUrls]);
 
-    React.useEffect(() => {
+    const readHistoryFromStorage = React.useCallback((): HistoryMetadata[] => {
         try {
             const storedHistory = localStorage.getItem('openaiImageHistory');
             if (storedHistory) {
                 const parsedHistory: HistoryMetadata[] = JSON.parse(storedHistory);
                 if (Array.isArray(parsedHistory)) {
-                    setHistory(parsedHistory);
-                } else {
-                    console.warn('Invalid history data found in localStorage.');
-                    localStorage.removeItem('openaiImageHistory');
+                    return parsedHistory;
                 }
+
+                console.warn('Invalid history data found in localStorage.');
+                localStorage.removeItem('openaiImageHistory');
             }
         } catch (e) {
             console.error('Failed to load or parse history from localStorage:', e);
             localStorage.removeItem('openaiImageHistory');
         }
-        setIsInitialLoad(false);
+
+        return [];
     }, []);
+
+    React.useEffect(() => {
+        setHistory(readHistoryFromStorage());
+        setIsInitialLoad(false);
+    }, [readHistoryFromStorage]);
+
+    React.useEffect(() => {
+        const refreshHistory = () => {
+            setHistory(readHistoryFromStorage());
+        };
+
+        const refreshWhenVisible = () => {
+            if (!document.hidden) {
+                refreshHistory();
+            }
+        };
+
+        window.addEventListener('pageshow', refreshHistory);
+        window.addEventListener('focus', refreshHistory);
+        document.addEventListener('visibilitychange', refreshWhenVisible);
+
+        return () => {
+            window.removeEventListener('pageshow', refreshHistory);
+            window.removeEventListener('focus', refreshHistory);
+            document.removeEventListener('visibilitychange', refreshWhenVisible);
+        };
+    }, [readHistoryFromStorage]);
 
     React.useEffect(() => {
         const fetchAuthStatus = async () => {
@@ -347,6 +409,54 @@ export default function HomePage() {
         return 'image/png';
     };
 
+    const cacheApiImageForDisplay = async (
+        img: ApiImageResponseItem
+    ): Promise<{ path: string; filename: string } | null> => {
+        if (img.b64_json) {
+            try {
+                const byteCharacters = atob(img.b64_json);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+
+                const actualMimeType = getMimeTypeFromFormat(img.output_format);
+                const blob = new Blob([byteArray], { type: actualMimeType });
+
+                await db.images.put({ filename: img.filename, blob });
+
+                const previousBlobUrl = blobUrlCacheRef.current.get(img.filename);
+                if (previousBlobUrl) {
+                    URL.revokeObjectURL(previousBlobUrl);
+                }
+
+                const blobUrl = URL.createObjectURL(blob);
+                blobUrlCacheRef.current.set(img.filename, blobUrl);
+                setImageSrcByFilename((current) => ({
+                    ...current,
+                    [img.filename]: blobUrl
+                }));
+
+                return { filename: img.filename, path: blobUrl };
+            } catch (dbError) {
+                console.error(`Error caching blob ${img.filename} to IndexedDB:`, dbError);
+                if (effectiveStorageModeClient === 'indexeddb') {
+                    setError(t('page.saveIndexedDbError', { filename: img.filename }));
+                    return null;
+                }
+            }
+        } else {
+            console.warn(`Image ${img.filename} missing b64_json; falling back to server path when available.`);
+        }
+
+        if (img.path) {
+            return { filename: img.filename, path: img.path };
+        }
+
+        return null;
+    };
+
     const handleApiCall = async (formData: GenerationFormData | EditingFormData) => {
         const startTime = Date.now();
         let durationMs = 0;
@@ -357,11 +467,10 @@ export default function HomePage() {
         setError(null);
         setLatestImageBatch(null);
         setImageOutputView('grid');
-        setStreamingPreviewImages(new Map());
 
         const apiFormData = new FormData();
-        const apiKey = settings.apiKey.trim();
-        const baseUrl = settings.baseUrl.trim() || defaultApiBaseUrl;
+        const apiKey = apiKeyDraft.trim() || settings.apiKey.trim();
+        const baseUrl = defaultApiBaseUrl;
 
         if (apiKey) {
             apiFormData.append('apiKey', apiKey);
@@ -378,12 +487,6 @@ export default function HomePage() {
             return;
         }
         apiFormData.append('mode', mode);
-
-        // Add streaming parameters if enabled
-        if (enableStreaming) {
-            apiFormData.append('stream', 'true');
-            apiFormData.append('partial_images', partialImages.toString());
-        }
 
         let requestSize = '';
         let requestOutputCompression: number | undefined;
@@ -468,14 +571,8 @@ export default function HomePage() {
                                 const event = JSON.parse(jsonStr);
 
                                 if (event.type === 'partial_image') {
-                                    // Update streaming preview with partial image
-                                    const imageIndex = event.index ?? 0;
-                                    const dataUrl = `data:image/png;base64,${event.b64_json}`;
-                                    setStreamingPreviewImages((prev) => {
-                                        const newMap = new Map(prev);
-                                        newMap.set(imageIndex, dataUrl);
-                                        return newMap;
-                                    });
+                                    // Streaming previews are intentionally hidden in the UI.
+                                    continue;
                                 } else if (event.type === 'error') {
                                     throw new Error(event.error || t('page.streamingError'));
                                 } else if (event.type === 'done') {
@@ -524,69 +621,14 @@ export default function HomePage() {
                                             model: currentModel,
                                             size: requestSize,
                                             output_compression: requestOutputCompression,
-                                            streaming: enableStreaming,
-                                            partialImages: enableStreaming ? partialImages : undefined,
+                                            streaming: false,
                                             sourceImageCount: requestSourceImageCount,
                                             hasMask: requestHasMask
                                         };
 
-                                        let newImageBatchPromises: Promise<{
-                                            path: string;
-                                            filename: string;
-                                        } | null>[] = [];
-                                        if (effectiveStorageModeClient === 'indexeddb') {
-                                            newImageBatchPromises = event.images.map(
-                                                async (img: ApiImageResponseItem) => {
-                                                    if (img.b64_json) {
-                                                        try {
-                                                            const byteCharacters = atob(img.b64_json);
-                                                            const byteNumbers = new Array(byteCharacters.length);
-                                                            for (let i = 0; i < byteCharacters.length; i++) {
-                                                                byteNumbers[i] = byteCharacters.charCodeAt(i);
-                                                            }
-                                                            const byteArray = new Uint8Array(byteNumbers);
-
-                                                            const actualMimeType = getMimeTypeFromFormat(
-                                                                img.output_format
-                                                            );
-                                                            const blob = new Blob([byteArray], {
-                                                                type: actualMimeType
-                                                            });
-
-                                                            await db.images.put({ filename: img.filename, blob });
-
-                                                            const blobUrl = URL.createObjectURL(blob);
-                                                            blobUrlCacheRef.current.set(img.filename, blobUrl);
-
-                                                            return { filename: img.filename, path: blobUrl };
-                                                        } catch (dbError) {
-                                                            console.error(
-                                                                `Error saving blob ${img.filename} to IndexedDB:`,
-                                                                dbError
-                                                            );
-                                                            setError(
-                                                                t('page.saveIndexedDbError', { filename: img.filename })
-                                                            );
-                                                            return null;
-                                                        }
-                                                    } else {
-                                                        console.warn(
-                                                            `Image ${img.filename} missing b64_json in indexeddb mode.`
-                                                        );
-                                                        return null;
-                                                    }
-                                                }
-                                            );
-                                        } else {
-                                            newImageBatchPromises = event.images
-                                                .filter((img: ApiImageResponseItem) => !!img.path)
-                                                .map((img: ApiImageResponseItem) =>
-                                                    Promise.resolve({
-                                                        path: img.path!,
-                                                        filename: img.filename
-                                                    })
-                                                );
-                                        }
+                                        const newImageBatchPromises = event.images.map((img: ApiImageResponseItem) =>
+                                            cacheApiImageForDisplay(img)
+                                        );
 
                                         const processedImages = (await Promise.all(newImageBatchPromises)).filter(
                                             Boolean
@@ -597,7 +639,6 @@ export default function HomePage() {
 
                                         setLatestImageBatch(processedImages);
                                         setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
-                                        setStreamingPreviewImages(new Map()); // Clear streaming previews
 
                                         setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
                                     }
@@ -669,53 +710,14 @@ export default function HomePage() {
                     model: currentModel,
                     size: requestSize,
                     output_compression: requestOutputCompression,
-                    streaming: enableStreaming,
-                    partialImages: enableStreaming ? partialImages : undefined,
+                    streaming: false,
                     sourceImageCount: requestSourceImageCount,
                     hasMask: requestHasMask
                 };
 
-                let newImageBatchPromises: Promise<{ path: string; filename: string } | null>[] = [];
-                if (effectiveStorageModeClient === 'indexeddb') {
-                    newImageBatchPromises = result.images.map(async (img: ApiImageResponseItem) => {
-                        if (img.b64_json) {
-                            try {
-                                const byteCharacters = atob(img.b64_json);
-                                const byteNumbers = new Array(byteCharacters.length);
-                                for (let i = 0; i < byteCharacters.length; i++) {
-                                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                                }
-                                const byteArray = new Uint8Array(byteNumbers);
-
-                                const actualMimeType = getMimeTypeFromFormat(img.output_format);
-                                const blob = new Blob([byteArray], { type: actualMimeType });
-
-                                await db.images.put({ filename: img.filename, blob });
-
-                                const blobUrl = URL.createObjectURL(blob);
-                                blobUrlCacheRef.current.set(img.filename, blobUrl);
-
-                                return { filename: img.filename, path: blobUrl };
-                            } catch (dbError) {
-                                console.error(`Error saving blob ${img.filename} to IndexedDB:`, dbError);
-                                setError(t('page.saveIndexedDbError', { filename: img.filename }));
-                                return null;
-                            }
-                        } else {
-                            console.warn(`Image ${img.filename} missing b64_json in indexeddb mode.`);
-                            return null;
-                        }
-                    });
-                } else {
-                    newImageBatchPromises = result.images
-                        .filter((img: ApiImageResponseItem) => !!img.path)
-                        .map((img: ApiImageResponseItem) =>
-                            Promise.resolve({
-                                path: img.path!,
-                                filename: img.filename
-                            })
-                        );
-                }
+                const newImageBatchPromises = result.images.map((img: ApiImageResponseItem) =>
+                    cacheApiImageForDisplay(img)
+                );
 
                 const processedImages = (await Promise.all(newImageBatchPromises)).filter(Boolean) as {
                     path: string;
@@ -736,7 +738,6 @@ export default function HomePage() {
             const errorMessage = err instanceof Error ? err.message : t('page.unexpectedError');
             setError(errorMessage);
             setLatestImageBatch(null);
-            setStreamingPreviewImages(new Map());
         } finally {
             if (durationMs === 0) durationMs = Date.now() - startTime;
             setIsLoading(false);
@@ -746,15 +747,11 @@ export default function HomePage() {
 
     const handleHistorySelect = React.useCallback(
         (item: HistoryMetadata) => {
-            const originalStorageMode = item.storageModeUsed || 'fs';
-
             const selectedBatchPromises = item.images.map(async (imgInfo) => {
-                let path: string | undefined;
-                if (originalStorageMode === 'indexeddb') {
-                    path = getImageSrc(imgInfo.filename);
-                } else {
-                    path = `/api/image/${imgInfo.filename}`;
-                }
+                const originalStorageMode = item.storageModeUsed || 'fs';
+                const path =
+                    getImageSrc(imgInfo.filename) ??
+                    (originalStorageMode === 'fs' && isImageCacheReady ? `/api/image/${imgInfo.filename}` : undefined);
 
                 if (path) {
                     return { path, filename: imgInfo.filename };
@@ -780,7 +777,7 @@ export default function HomePage() {
                 setImageOutputView(validImages.length > 1 ? 'grid' : 0);
             });
         },
-        [getImageSrc, t]
+        [getImageSrc, isImageCacheReady, t]
     );
 
     const handleClearHistory = React.useCallback(async () => {
@@ -798,11 +795,10 @@ export default function HomePage() {
             try {
                 localStorage.removeItem('openaiImageHistory');
 
-                if (effectiveStorageModeClient === 'indexeddb') {
-                    await db.images.clear();
-                    blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
-                    blobUrlCacheRef.current.clear();
-                }
+                await db.images.clear();
+                blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+                blobUrlCacheRef.current.clear();
+                setImageSrcByFilename({});
             } catch (e) {
                 console.error('Failed during history clearing:', e);
                 setError(t('page.clearHistoryError', { message: e instanceof Error ? e.message : String(e) }));
@@ -831,14 +827,12 @@ export default function HomePage() {
             let blob: Blob | undefined;
             let mimeType: string = 'image/png';
 
-            if (effectiveStorageModeClient === 'indexeddb') {
-                const record = allDbImages?.find((img) => img.filename === filename);
-                if (record?.blob) {
-                    blob = record.blob;
-                    mimeType = blob.type || mimeType;
-                } else {
-                    throw new Error(t('page.imageNotFoundLocal', { filename }));
-                }
+            const localRecord = allDbImages?.find((img) => img.filename === filename);
+            if (localRecord?.blob) {
+                blob = localRecord.blob;
+                mimeType = blob.type || mimeType;
+            } else if (effectiveStorageModeClient === 'indexeddb') {
+                throw new Error(t('page.imageNotFoundLocal', { filename }));
             } else {
                 const response = await fetch(`/api/image/${filename}`);
                 if (!response.ok) {
@@ -878,17 +872,25 @@ export default function HomePage() {
             setError(null);
 
             const { images: imagesInEntry, storageModeUsed, timestamp } = item;
+            const storageMode = storageModeUsed || 'fs';
             const filenamesToDelete = imagesInEntry.map((img) => img.filename);
 
             try {
-                if (storageModeUsed === 'indexeddb') {
-                    await db.images.where('filename').anyOf(filenamesToDelete).delete();
-                    filenamesToDelete.forEach((fn) => {
-                        const url = blobUrlCacheRef.current.get(fn);
-                        if (url) URL.revokeObjectURL(url);
-                        blobUrlCacheRef.current.delete(fn);
+                await db.images.where('filename').anyOf(filenamesToDelete).delete();
+                filenamesToDelete.forEach((fn) => {
+                    const url = blobUrlCacheRef.current.get(fn);
+                    if (url) URL.revokeObjectURL(url);
+                    blobUrlCacheRef.current.delete(fn);
+                });
+                setImageSrcByFilename((current) => {
+                    const next = { ...current };
+                    filenamesToDelete.forEach((filename) => {
+                        delete next[filename];
                     });
-                } else if (storageModeUsed === 'fs') {
+                    return next;
+                });
+
+                if (storageMode === 'fs') {
                     const apiPayload: { filenames: string[]; passwordHash?: string } = {
                         filenames: filenamesToDelete
                     };
@@ -946,7 +948,7 @@ export default function HomePage() {
     }, []);
 
     return (
-        <main className='flex min-h-screen flex-col items-center bg-black p-4 text-white md:p-8 lg:p-12'>
+        <main className='min-h-screen bg-black p-3 text-white md:p-4 lg:h-screen lg:overflow-hidden'>
             <PasswordDialog
                 isOpen={isPasswordDialogOpen}
                 onOpenChange={setIsPasswordDialogOpen}
@@ -958,19 +960,116 @@ export default function HomePage() {
                         : t('page.setPasswordDescription')
                 }
             />
-            <LanguageSelect />
-            <Button
-                asChild
-                variant='outline'
-                className='fixed top-4 right-4 z-40 border-white/20 bg-black/90 text-white/80 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white'>
-                <Link href='/settings' aria-label={t('settings.title')}>
-                    <Settings className='h-4 w-4' />
-                    <span className='hidden sm:inline'>{t('settings.title')}</span>
-                </Link>
-            </Button>
-            <div className='w-full max-w-screen-2xl space-y-6'>
-                <div className='grid grid-cols-1 gap-6 lg:grid-cols-2'>
-                    <div className='relative flex h-[70vh] min-h-[600px] flex-col lg:col-span-1'>
+            <div className='flex min-h-screen w-full flex-col gap-3 lg:h-full lg:min-h-0'>
+                <header className='shrink-0 rounded-lg border border-white/10 bg-black/95 px-4 py-3 shadow-sm'>
+                    <div className='flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between'>
+                        <div className='min-w-0'>
+                            <p className='text-xs font-medium tracking-[0.16em] text-white/45 uppercase'>
+                                {t('home.kicker')}
+                            </p>
+                            <h1 className='mt-0.5 text-2xl font-semibold text-white md:text-3xl'>{t('home.title')}</h1>
+                            <p className='mt-1 text-sm text-white/55'>
+                                {t('home.fixedEndpoint', { url: defaultApiBaseUrl })}
+                            </p>
+                        </div>
+
+                        <div className='grid gap-2 sm:grid-cols-[minmax(360px,520px)_140px_44px] sm:items-start'>
+                            <div className='min-w-0'>
+                                <Label
+                                    htmlFor='home-api-key'
+                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
+                                    <KeyRound className='h-3.5 w-3.5' />
+                                    {t('settings.apiKey')}
+                                </Label>
+                                <div className='flex gap-2'>
+                                    <Input
+                                        id='home-api-key'
+                                        type={showApiKey ? 'text' : 'password'}
+                                        value={apiKeyDraft}
+                                        onChange={(event) => handleApiKeyChange(event.target.value)}
+                                        placeholder={t('settings.apiKeyPlaceholder')}
+                                        className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
+                                    />
+                                    <Button
+                                        type='button'
+                                        variant='outline'
+                                        size='icon'
+                                        onClick={() => setShowApiKey((current) => !current)}
+                                        className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
+                                        aria-label={showApiKey ? t('home.hideApiKey') : t('home.showApiKey')}>
+                                        {showApiKey ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
+                                    </Button>
+                                    <Button
+                                        asChild
+                                        type='button'
+                                        variant='outline'
+                                        className='h-9 shrink-0 border-white/20 px-2.5 text-xs text-white/75 hover:bg-white/10 hover:text-white'>
+                                        <a
+                                            href='https://api.774966.xyz/console/token'
+                                            target='_blank'
+                                            rel='noreferrer'
+                                            aria-label={t('home.getApiKeyAria')}>
+                                            <ExternalLink className='h-3.5 w-3.5' />
+                                            {t('home.getApiKey')}
+                                        </a>
+                                    </Button>
+                                </div>
+                            </div>
+
+                            <div className='min-w-0'>
+                                <p className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
+                                    <Languages className='h-3.5 w-3.5' />
+                                    {t('settings.language')}
+                                </p>
+                                <Select
+                                    value={languagePreference}
+                                    onValueChange={(value) => setLanguagePreference(value as LanguagePreference)}>
+                                    <SelectTrigger
+                                        aria-label={t('settings.languageAria')}
+                                        className='h-9 w-full border-white/20 bg-black text-white focus:border-white/50 focus:ring-white/50'>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent className='border-white/20 bg-black text-white'>
+                                        <SelectItem value='system' className='focus:bg-white/10'>
+                                            {t('settings.system')}
+                                        </SelectItem>
+                                        <SelectItem value='en' className='focus:bg-white/10'>
+                                            {t('settings.english')}
+                                        </SelectItem>
+                                        <SelectItem value='zh' className='focus:bg-white/10'>
+                                            {t('settings.chinese')}
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div>
+                                <p className='mb-1.5 text-xs font-medium text-white/70'>{t('settings.theme')}</p>
+                                <Button
+                                    type='button'
+                                    variant='outline'
+                                    size='icon'
+                                    onClick={handleThemeToggle}
+                                    className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
+                                    aria-label={t('home.toggleTheme')}>
+                                    {currentTheme === 'dark' ? (
+                                        <Moon className='h-4 w-4' />
+                                    ) : (
+                                        <Sun className='h-4 w-4' />
+                                    )}
+                                </Button>
+                            </div>
+
+                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45 sm:col-span-3'>
+                                {apiKeyDraft.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
+                                {t('home.apiKeyHelp')}
+                            </p>
+                        </div>
+                    </div>
+                </header>
+
+                <div className='grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(340px,420px)_minmax(300px,1fr)_minmax(280px,320px)] lg:overflow-hidden xl:grid-cols-[minmax(420px,520px)_minmax(420px,1fr)_minmax(320px,360px)] 2xl:grid-cols-[minmax(500px,620px)_minmax(480px,1fr)_minmax(360px,400px)]'>
+                    <section className='relative flex min-h-[620px] flex-col lg:min-h-0 lg:overflow-hidden'>
                         <div className={mode === 'generate' ? 'block h-full w-full' : 'hidden'}>
                             <GenerationForm
                                 onSubmit={handleApiCall}
@@ -981,8 +1080,6 @@ export default function HomePage() {
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
                                 model={genModel}
-                                setModel={setGenModel}
-                                modelOptions={modelOptions}
                                 prompt={genPrompt}
                                 setPrompt={setGenPrompt}
                                 n={genN}
@@ -1003,10 +1100,6 @@ export default function HomePage() {
                                 setBackground={setGenBackground}
                                 moderation={genModeration}
                                 setModeration={setGenModeration}
-                                enableStreaming={enableStreaming}
-                                setEnableStreaming={setEnableStreaming}
-                                partialImages={partialImages}
-                                setPartialImages={setPartialImages}
                             />
                         </div>
                         <div className={mode === 'edit' ? 'block h-full w-full' : 'hidden'}>
@@ -1019,8 +1112,6 @@ export default function HomePage() {
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
                                 editModel={editModel}
-                                setEditModel={setEditModel}
-                                modelOptions={modelOptions}
                                 imageFiles={editImageFiles}
                                 sourceImagePreviewUrls={editSourceImagePreviewUrls}
                                 setImageFiles={setEditImageFiles}
@@ -1052,48 +1143,47 @@ export default function HomePage() {
                                 setEditDrawnPoints={setEditDrawnPoints}
                                 editMaskPreviewUrl={editMaskPreviewUrl}
                                 setEditMaskPreviewUrl={setEditMaskPreviewUrl}
-                                enableStreaming={enableStreaming}
-                                setEnableStreaming={setEnableStreaming}
-                                partialImages={partialImages}
-                                setPartialImages={setPartialImages}
                             />
                         </div>
-                    </div>
-                    <div className='flex h-[70vh] min-h-[600px] flex-col lg:col-span-1'>
+                    </section>
+
+                    <section className='flex min-h-[520px] flex-col lg:min-h-0 lg:overflow-hidden'>
                         {error && (
-                            <Alert variant='destructive' className='mb-4 border-red-500/50 bg-red-900/20 text-red-300'>
+                            <Alert variant='destructive' className='mb-3 border-red-500/50 bg-red-900/20 text-red-300'>
                                 <AlertTitle className='text-red-200'>{t('common.error')}</AlertTitle>
                                 <AlertDescription>{error}</AlertDescription>
                             </Alert>
                         )}
-                        <ImageOutput
-                            imageBatch={latestImageBatch}
-                            viewMode={imageOutputView}
-                            onViewChange={setImageOutputView}
-                            altText={t('output.generatedAlt')}
-                            isLoading={isLoading || isSendingToEdit}
-                            elapsedSeconds={elapsedSeconds}
-                            onSendToEdit={handleSendToEdit}
-                            currentMode={mode}
-                            baseImagePreviewUrl={editSourceImagePreviewUrls[0] || null}
-                            streamingPreviewImages={streamingPreviewImages}
-                        />
-                    </div>
-                </div>
+                        <div className='min-h-0 flex-1'>
+                            <ImageOutput
+                                imageBatch={latestImageBatch}
+                                viewMode={imageOutputView}
+                                onViewChange={setImageOutputView}
+                                altText={t('output.generatedAlt')}
+                                isLoading={isLoading || isSendingToEdit}
+                                elapsedSeconds={elapsedSeconds}
+                                onSendToEdit={handleSendToEdit}
+                                currentMode={mode}
+                                baseImagePreviewUrl={editSourceImagePreviewUrls[0] || null}
+                            />
+                        </div>
+                    </section>
 
-                <div className='min-h-[450px]'>
-                    <HistoryPanel
-                        history={history}
-                        onSelectImage={handleHistorySelect}
-                        onClearHistory={handleClearHistory}
-                        getImageSrc={getImageSrc}
-                        onDeleteItemRequest={handleRequestDeleteItem}
-                        itemPendingDeleteConfirmation={itemToDeleteConfirm}
-                        onConfirmDeletion={handleConfirmDeletion}
-                        onCancelDeletion={handleCancelDeletion}
-                        deletePreferenceDialogValue={dialogCheckboxStateSkipConfirm}
-                        onDeletePreferenceDialogChange={setDialogCheckboxStateSkipConfirm}
-                    />
+                    <section className='min-h-[480px] lg:min-h-0 lg:overflow-hidden'>
+                        <HistoryPanel
+                            history={history}
+                            onSelectImage={handleHistorySelect}
+                            onClearHistory={handleClearHistory}
+                            getImageSrc={getImageSrc}
+                            isImageCacheReady={isImageCacheReady}
+                            onDeleteItemRequest={handleRequestDeleteItem}
+                            itemPendingDeleteConfirmation={itemToDeleteConfirm}
+                            onConfirmDeletion={handleConfirmDeletion}
+                            onCancelDeletion={handleCancelDeletion}
+                            deletePreferenceDialogValue={dialogCheckboxStateSkipConfirm}
+                            onDeletePreferenceDialogChange={setDialogCheckboxStateSkipConfirm}
+                        />
+                    </section>
                 </div>
             </div>
         </main>

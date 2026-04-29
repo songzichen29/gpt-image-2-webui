@@ -23,7 +23,6 @@ type ImageOutputProps = {
     onSendToEdit: (filename: string) => void;
     currentMode: 'generate' | 'edit';
     baseImagePreviewUrl: string | null;
-    streamingPreviewImages?: Map<number, string>;
 };
 
 const getGridColsClass = (count: number): string => {
@@ -49,8 +48,7 @@ export function ImageOutput({
     elapsedSeconds,
     onSendToEdit,
     currentMode,
-    baseImagePreviewUrl,
-    streamingPreviewImages
+    baseImagePreviewUrl
 }: ImageOutputProps) {
     const { t } = useI18n();
     const [previewImage, setPreviewImage] = React.useState<PreviewImage | null>(null);
@@ -93,35 +91,7 @@ export function ImageOutput({
             />
             <div className='relative flex h-full w-full flex-grow items-center justify-center overflow-hidden'>
                 {isLoading ? (
-                    streamingPreviewImages && streamingPreviewImages.size > 0 ? (
-                        // Show streaming preview images - single image centered like final view
-                        <div className='relative flex h-full w-full items-center justify-center'>
-                            {/* Show the latest preview image (highest index) */}
-                            {(() => {
-                                const entries = Array.from(streamingPreviewImages.entries());
-                                const latestEntry = entries[entries.length - 1];
-                                if (!latestEntry) return null;
-                                const [, dataUrl] = latestEntry;
-                                return (
-                                    <Image
-                                        src={dataUrl}
-                                        alt={t('output.streamingPreviewAlt')}
-                                        width={512}
-                                        height={512}
-                                        className='max-h-full max-w-full object-contain'
-                                        unoptimized
-                                    />
-                                );
-                            })()}
-                            {/* Overlay loader at bottom center */}
-                            <div className='absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-white/80'>
-                                <Loader2 className='h-4 w-4 animate-spin' />
-                                <p className='text-sm'>
-                                    {t('output.streaming')} - {elapsedLabel}
-                                </p>
-                            </div>
-                        </div>
-                    ) : currentMode === 'edit' && baseImagePreviewUrl ? (
+                    currentMode === 'edit' && baseImagePreviewUrl ? (
                         <div className='relative flex h-full w-full items-center justify-center'>
                             <Image
                                 src={baseImagePreviewUrl}

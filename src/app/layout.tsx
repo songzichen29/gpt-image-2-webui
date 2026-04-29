@@ -20,6 +20,9 @@ export const metadata: Metadata = {
     description: "Generate and edit images using OpenAI's GPT Image models.",
     icons: {
         icon: '/favicon.svg'
+    },
+    other: {
+        google: 'notranslate'
     }
 };
 
@@ -29,8 +32,8 @@ export default function RootLayout({
     children: React.ReactNode;
 }>) {
     return (
-        <html lang='en' suppressHydrationWarning>
-            <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <html lang='en' translate='no' className='notranslate' suppressHydrationWarning>
+            <body translate='no' className={`${geistSans.variable} ${geistMono.variable} notranslate antialiased`}>
                 <ThemeProvider attribute='class' defaultTheme='dark' enableSystem disableTransitionOnChange>
                     <I18nProvider>
                         <AppSettingsProvider>{children}</AppSettingsProvider>

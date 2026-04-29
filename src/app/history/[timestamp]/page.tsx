@@ -6,9 +6,10 @@ import { Button } from '@/components/ui/button';
 import { formatUsdCny, getModelRates, USD_TO_CNY_RATE, type GptImageModel } from '@/lib/cost-utils';
 import { db, type ImageRecord } from '@/lib/db';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
+import { getServerImageExpiryStatus } from '@/lib/image-retention';
 import { cn } from '@/lib/utils';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, Check, Copy, Database, Download, FileImage, HardDrive } from 'lucide-react';
+import { ArrowLeft, Check, Clock, Copy, Database, Download, FileImage, HardDrive } from 'lucide-react';
 import Image from 'next/image';
 import { useParams, useRouter } from 'next/navigation';
 import * as React from 'react';
@@ -25,13 +26,20 @@ const tokenCost = (tokens: number, rate: number): number => tokens * rate;
 export default function HistoryDetailPage() {
     const router = useRouter();
     const params = useParams<{ timestamp: string }>();
-    const { t } = useI18n();
+    const { language, t } = useI18n();
     const [item, setItem] = React.useState<HistoryMetadata | null | undefined>(undefined);
     const [selectedImageIndex, setSelectedImageIndex] = React.useState(0);
     const [copiedPrompt, setCopiedPrompt] = React.useState(false);
+    const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
+    const [now, setNow] = React.useState(() => Date.now());
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
 
     const allDbImages = useLiveQuery<ImageRecord[] | undefined>(() => db.images.toArray(), []);
+
+    React.useEffect(() => {
+        const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+        return () => window.clearInterval(timer);
+    }, []);
 
     React.useEffect(() => {
         const timestamp = Number(params.timestamp);
@@ -65,33 +73,36 @@ export default function HistoryDetailPage() {
         };
     }, []);
 
-    const getImageSrc = React.useCallback(
-        (filename: string, storageMode: HistoryMetadata['storageModeUsed']): string | undefined => {
-            if ((storageMode || 'fs') === 'fs') {
-                return `/api/image/${filename}`;
-            }
+    React.useEffect(() => {
+        blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+        blobUrlCacheRef.current.clear();
 
-            const cached = blobUrlCacheRef.current.get(filename);
-            if (cached) return cached;
-
-            const record = allDbImages?.find((img) => img.filename === filename);
-            if (record?.blob) {
-                const url = URL.createObjectURL(record.blob);
-                blobUrlCacheRef.current.set(filename, url);
-                return url;
-            }
-
-            return undefined;
-        },
-        [allDbImages]
-    );
-
-    const handleBack = () => {
-        if (window.history.length > 1) {
-            router.back();
+        if (!item || allDbImages === undefined) {
+            setImageSrcByFilename({});
             return;
         }
 
+        const storageMode = item.storageModeUsed || 'fs';
+        const nextSrcByFilename: Record<string, string> = {};
+
+        item.images.forEach((imageInfo) => {
+            const record = allDbImages.find((img) => img.filename === imageInfo.filename);
+            if (record?.blob) {
+                const url = URL.createObjectURL(record.blob);
+                blobUrlCacheRef.current.set(imageInfo.filename, url);
+                nextSrcByFilename[imageInfo.filename] = url;
+                return;
+            }
+
+            if (storageMode === 'fs') {
+                nextSrcByFilename[imageInfo.filename] = `/api/image/${imageInfo.filename}`;
+            }
+        });
+
+        setImageSrcByFilename(nextSrcByFilename);
+    }, [allDbImages, item]);
+
+    const handleBack = () => {
         router.push('/');
     };
 
@@ -140,17 +151,18 @@ export default function HistoryDetailPage() {
     const rates = getModelRates(model);
     const imageCount = item.images?.length ?? 0;
     const generatedAt = new Date(item.timestamp).toLocaleString();
+    const expiryStatus = getServerImageExpiryStatus(item.timestamp, now, language);
+    const expiresAtText = expiryStatus.expiresAt.toLocaleString();
     const images = item.images.map((imageInfo, index) => ({
         ...imageInfo,
         index,
-        src: getImageSrc(imageInfo.filename, storageMode)
+        src: imageSrcByFilename[imageInfo.filename]
     }));
     const selectedImage = images[selectedImageIndex] ?? images[0];
 
     const detailRows: Array<[string, React.ReactNode]> = [
         [t('history.createdAt'), generatedAt],
         [t('history.duration'), formatDuration(item.durationMs)],
-        [t('history.model'), model],
         [t('common.size'), item.size || '-'],
         [t('history.quality'), formatOptionLabel(item.quality, t)],
         [t('history.bg'), formatOptionLabel(item.background, t)],
@@ -158,9 +170,8 @@ export default function HistoryDetailPage() {
         [t('common.outputFormat'), (item.output_format || 'png').toUpperCase()],
         [t('history.outputCompression'), item.output_compression === undefined ? '-' : `${item.output_compression}%`],
         [t('history.storageMode'), storageMode === 'fs' ? t('history.storageFile') : t('history.storageDb')],
+        [t('history.serverExpiryAt'), expiresAtText],
         [t('history.imageCount'), imageCount.toLocaleString()],
-        [t('history.streaming'), item.streaming ? t('common.yes') : t('common.no')],
-        [t('history.partialImages'), item.partialImages?.toLocaleString() ?? '-'],
         [t('history.sourceImages'), item.sourceImageCount?.toLocaleString() ?? '-'],
         [t('history.mask'), item.hasMask === undefined ? '-' : item.hasMask ? t('common.yes') : t('common.no')]
     ];
@@ -295,6 +306,60 @@ export default function HistoryDetailPage() {
                         <div className='min-h-0 flex-1 space-y-3 overflow-y-auto p-3'>
                             <section className='rounded-md border border-white/10 bg-white/[0.03] p-3'>
                                 <div className='mb-2 flex items-center justify-between gap-3'>
+                                    <h2 className='text-sm font-medium text-white'>{t('history.promptTitle')}</h2>
+                                    <Button
+                                        type='button'
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={handleCopyPrompt}
+                                        disabled={!item.prompt}
+                                        className='h-7 border-white/20 px-2 text-xs text-white/80 hover:bg-white/10 hover:text-white'>
+                                        {copiedPrompt ? (
+                                            <Check className='h-3.5 w-3.5 text-green-400' />
+                                        ) : (
+                                            <Copy className='h-3.5 w-3.5' />
+                                        )}
+                                        {copiedPrompt ? t('common.copied') : t('common.copy')}
+                                    </Button>
+                                </div>
+                                <div className='max-h-44 overflow-y-auto rounded border border-white/5 bg-black/25 p-2 text-xs whitespace-pre-wrap text-white/75'>
+                                    {item.prompt || t('history.noPrompt')}
+                                </div>
+                            </section>
+
+                            <section
+                                className={cn(
+                                    'rounded-md border p-3',
+                                    expiryStatus.isExpired
+                                        ? 'border-red-400/25 bg-red-500/10'
+                                        : 'border-amber-300/25 bg-amber-300/10'
+                                )}>
+                                <div className='mb-2 flex items-center gap-2'>
+                                    <Clock
+                                        className={cn(
+                                            'h-4 w-4',
+                                            expiryStatus.isExpired ? 'text-red-200' : 'text-amber-100'
+                                        )}
+                                    />
+                                    <h2 className='text-sm font-medium text-white'>
+                                        {t('history.serverExpiryNoticeTitle')}
+                                    </h2>
+                                </div>
+                                <p className='text-xs font-medium text-white/85'>
+                                    {expiryStatus.isExpired
+                                        ? t('history.serverExpiryExpiredDetail', { date: expiresAtText })
+                                        : t('history.serverExpiryCountdown', {
+                                              time: expiryStatus.remainingText,
+                                              date: expiresAtText
+                                          })}
+                                </p>
+                                <p className='mt-2 text-xs leading-relaxed text-white/60'>
+                                    {t('history.serverExpiryNotice')}
+                                </p>
+                            </section>
+
+                            <section className='rounded-md border border-white/10 bg-white/[0.03] p-3'>
+                                <div className='mb-2 flex items-center justify-between gap-3'>
                                     <h2 className='text-sm font-medium text-white'>{t('history.requestSettings')}</h2>
                                     <div className='flex items-center gap-1 text-xs text-white/45'>
                                         {storageMode === 'fs' ? (
@@ -305,7 +370,7 @@ export default function HistoryDetailPage() {
                                         {storageMode === 'fs' ? t('history.storageFile') : t('history.storageDb')}
                                     </div>
                                 </div>
-                                <dl className='grid grid-cols-2 gap-2 text-xs'>
+                                <dl className='grid grid-cols-2 gap-2 text-xs xl:grid-cols-3'>
                                     {detailRows.map(([label, value]) => (
                                         <div
                                             key={label}
@@ -390,29 +455,6 @@ export default function HistoryDetailPage() {
                                 ) : (
                                     <p className='text-xs text-white/50'>{t('history.noCostDetails')}</p>
                                 )}
-                            </section>
-
-                            <section className='rounded-md border border-white/10 bg-white/[0.03] p-3'>
-                                <div className='mb-2 flex items-center justify-between gap-3'>
-                                    <h2 className='text-sm font-medium text-white'>{t('history.promptTitle')}</h2>
-                                    <Button
-                                        type='button'
-                                        variant='outline'
-                                        size='sm'
-                                        onClick={handleCopyPrompt}
-                                        disabled={!item.prompt}
-                                        className='h-7 border-white/20 px-2 text-xs text-white/80 hover:bg-white/10 hover:text-white'>
-                                        {copiedPrompt ? (
-                                            <Check className='h-3.5 w-3.5 text-green-400' />
-                                        ) : (
-                                            <Copy className='h-3.5 w-3.5' />
-                                        )}
-                                        {copiedPrompt ? t('common.copied') : t('common.copy')}
-                                    </Button>
-                                </div>
-                                <div className='max-h-36 overflow-y-auto rounded border border-white/5 bg-black/25 p-2 text-xs whitespace-pre-wrap text-white/75'>
-                                    {item.prompt || t('history.noPrompt')}
-                                </div>
                             </section>
                         </div>
                     </aside>
