@@ -121,6 +121,36 @@ http://服务器IP:3000
 
 这样在默认 `fs` 存储模式下，生成图片会持久保存在宿主机的 `generated-images` 目录。
 
+### 生成图片自动清理
+
+仓库提供了清理脚本 `scripts/cleanup-generated-images.sh`，默认清理脚本所在项目目录下的 `generated-images`；按本文路径部署时就是 `/opt/gpt-image-2-webui/generated-images`。日志默认写入 `/var/log/gpt-image-2-webui/cleanup-generated-images.log`。脚本会根据文件名里的生成时间戳判断过期时间，例如 `1777474614523-0.jpeg`；`.png`、`.jpg`、`.jpeg`、`.webp` 之外或命名不匹配的文件会跳过并写入日志。
+
+在服务器上先给脚本执行权限：
+
+```bash
+chmod +x /opt/gpt-image-2-webui/scripts/cleanup-generated-images.sh
+```
+
+直接运行脚本会进入中文交互菜单，可以试运行、立即清理、添加/查看/删除 cron 定时任务：
+
+```bash
+/opt/gpt-image-2-webui/scripts/cleanup-generated-images.sh
+```
+
+如果需要在 cron 或 systemd timer 中非交互执行，请加 `--run`，例如每天凌晨 3 点清理一次：
+
+```cron
+0 3 * * * /opt/gpt-image-2-webui/scripts/cleanup-generated-images.sh --run
+```
+
+如果项目目录不是 `/opt/gpt-image-2-webui`，可以显式指定目录、保留天数和日志：
+
+```cron
+0 3 * * * /your/project/scripts/cleanup-generated-images.sh --run --image-dir /your/project/generated-images --retention-days 3 --log-file /var/log/gpt-image-2-webui/cleanup-generated-images.log
+```
+
+更详细的说明见 `scripts/cleanup-generated-images-使用说明.md`。
+
 ### Docker 环境变量
 
 可以在项目根目录创建 `.env` 文件：
@@ -273,6 +303,7 @@ src/
   lib/                 本地配置、i18n、成本、尺寸、IndexedDB 等工具
 public/                静态资源
 readme-images/         README 截图（首页与历史详情）
+scripts/               服务器维护脚本，例如生成图片自动清理
 generated-images/      fs 模式下的图片输出目录
 ```
 
