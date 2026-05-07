@@ -10,13 +10,26 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { defaultApiBaseUrl, useAppSettings } from '@/lib/app-settings';
-import { calculateApiCost, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
+import { useAppSettings } from '@/lib/app-settings';
+import { calculateApiCost, formatUsdCny, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
 import { db, type ImageRecord } from '@/lib/db';
 import { useI18n, type LanguagePreference } from '@/lib/i18n';
 import { getPresetDimensions } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, Languages, Moon, Sun } from 'lucide-react';
+import {
+    CheckCircle2,
+    ChevronDown,
+    Cpu,
+    ExternalLink,
+    Eye,
+    EyeOff,
+    Globe2,
+    KeyRound,
+    Languages,
+    Loader2,
+    Moon,
+    Sun
+} from 'lucide-react';
 import { useTheme } from 'next-themes';
 import * as React from 'react';
 
@@ -98,21 +111,127 @@ type ImageApiResult = {
     error?: string;
 };
 
+type ModelsApiResult = {
+    models?: string[];
+    error?: string;
+};
+
+type ApiResponseInfo = {
+    status: 'loading' | 'success' | 'error';
+    endpoint: string;
+    method: string;
+    startedAt: number;
+    durationMs?: number;
+    httpStatus?: number;
+    contentType?: string | null;
+    responseKind?: 'event-stream' | 'json';
+    mode: 'generate' | 'edit';
+    model: string;
+    size: string;
+    n: number;
+    stream: boolean;
+    partialImages?: number;
+    storageMode: 'fs' | 'indexeddb';
+    imageCount?: number;
+    filenames?: string[];
+    costUsd?: number;
+    error?: string;
+    streamingStats?: {
+        partialImages: number;
+        completedImages: number;
+        doneReceived: boolean;
+    };
+};
+
+function getTokenConsoleUrl(baseUrl: string): string | null {
+    const trimmedBaseUrl = baseUrl.trim();
+    if (!trimmedBaseUrl) return null;
+
+    try {
+        const parsedBaseUrl = new URL(trimmedBaseUrl);
+        return new URL('/console/token', parsedBaseUrl.origin).toString();
+    } catch {
+        return null;
+    }
+}
+
+function normalizeModelOptions(model: string, existingModels: string[]): string[] {
+    const seen = new Set<string>();
+    const nextModels: string[] = [];
+
+    for (const rawModel of [model, ...existingModels]) {
+        const trimmedModel = rawModel.trim();
+        if (!trimmedModel || seen.has(trimmedModel)) continue;
+
+        seen.add(trimmedModel);
+        nextModels.push(trimmedModel);
+    }
+
+    const withoutIncompletePrefixes = removeIncompletePrefixModels(nextModels);
+
+    return withoutIncompletePrefixes.length > 0 ? withoutIncompletePrefixes : ['gpt-image-2'];
+}
+
+function removeIncompletePrefixModels(models: string[]): string[] {
+    return models.filter((model) => {
+        const looksIncomplete = model.endsWith('-') || !/\d/.test(model);
+        if (!looksIncomplete) return true;
+
+        return !models.some((otherModel) => otherModel !== model && otherModel.startsWith(model));
+    });
+}
+
+function mergeModelOptions(groups: string[][]): string[] {
+    const seen = new Set<string>();
+    const options: string[] = [];
+
+    for (const group of groups) {
+        for (const rawModel of removeIncompletePrefixModels(group)) {
+            const model = rawModel.trim();
+            if (!model || seen.has(model)) continue;
+
+            seen.add(model);
+            options.push(model);
+        }
+    }
+
+    return options.length > 0 ? options : ['gpt-image-2'];
+}
+
+function formatApiDuration(durationMs?: number): string {
+    if (durationMs === undefined) return '-';
+    if (durationMs < 1000) return `${durationMs}ms`;
+
+    return `${(durationMs / 1000).toFixed(1)}s`;
+}
+
+function formatContentType(contentType?: string | null): string {
+    return contentType?.split(';')[0] || '-';
+}
+
 export default function HomePage() {
     const { language, languagePreference, setLanguagePreference, t } = useI18n();
-    const { settings, saveSettings } = useAppSettings();
+    const { settings, modelOptions, saveSettings } = useAppSettings();
     const { resolvedTheme, setTheme } = useTheme();
     const [isThemeMounted, setIsThemeMounted] = React.useState(false);
     const [mode, setMode] = React.useState<'generate' | 'edit'>('generate');
     const [isPasswordRequiredByBackend, setIsPasswordRequiredByBackend] = React.useState<boolean | null>(null);
     const [clientPasswordHash, setClientPasswordHash] = React.useState<string | null>(null);
+    const [baseUrlDraft, setBaseUrlDraft] = React.useState(settings.baseUrl);
     const [apiKeyDraft, setApiKeyDraft] = React.useState(settings.apiKey);
+    const [modelDraft, setModelDraft] = React.useState(settings.models[0] ?? 'gpt-image-2');
+    const [remoteModelOptions, setRemoteModelOptions] = React.useState<string[]>([]);
+    const [isModelMenuOpen, setIsModelMenuOpen] = React.useState(false);
+    const [isFetchingModels, setIsFetchingModels] = React.useState(false);
+    const [modelFetchError, setModelFetchError] = React.useState<string | null>(null);
     const [showApiKey, setShowApiKey] = React.useState(false);
     const [isLoading, setIsLoading] = React.useState(false);
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
     const [error, setError] = React.useState<string | null>(null);
+    const [showApiResponseInfo, setShowApiResponseInfo] = React.useState(false);
+    const [apiResponseInfo, setApiResponseInfo] = React.useState<ApiResponseInfo | null>(null);
     const [latestImageBatch, setLatestImageBatch] = React.useState<ImageBatchItem[] | null>(null);
     const [latestBatchPrompt, setLatestBatchPrompt] = React.useState('');
     const [imageOutputView, setImageOutputView] = React.useState<'grid' | number>('grid');
@@ -120,6 +239,7 @@ export default function HomePage() {
     const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
     const [isInitialLoad, setIsInitialLoad] = React.useState(true);
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
+    const modelMenuRef = React.useRef<HTMLDivElement>(null);
     const [isPasswordDialogOpen, setIsPasswordDialogOpen] = React.useState(false);
     const [passwordDialogContext, setPasswordDialogContext] = React.useState<'initial' | 'retry'>('initial');
     const [lastApiCallArgs, setLastApiCallArgs] = React.useState<[GenerationFormData | EditingFormData] | null>(null);
@@ -148,7 +268,19 @@ export default function HomePage() {
     const [editDrawnPoints, setEditDrawnPoints] = React.useState<DrawnPoint[]>([]);
     const [editMaskPreviewUrl, setEditMaskPreviewUrl] = React.useState<string | null>(null);
 
-    const genModel = 'gpt-image-2' as GenerationFormData['model'];
+    const selectedModel = (modelDraft.trim() || settings.models[0] || 'gpt-image-2') as GptImageModel;
+    const combinedModelOptions = React.useMemo(
+        () => mergeModelOptions([remoteModelOptions, modelOptions]),
+        [modelOptions, remoteModelOptions]
+    );
+    const filteredModelOptions = React.useMemo(() => {
+        const query = modelDraft.trim().toLowerCase();
+        const filteredOptions = query
+            ? combinedModelOptions.filter((model) => model.toLowerCase().includes(query))
+            : combinedModelOptions;
+
+        return filteredOptions.slice(0, 50);
+    }, [combinedModelOptions, modelDraft]);
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
     const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('square');
@@ -159,8 +291,7 @@ export default function HomePage() {
     const [genCompression, setGenCompression] = React.useState([100]);
     const [genBackground, setGenBackground] = React.useState<GenerationFormData['background']>('auto');
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
-
-    const editModel = 'gpt-image-2' as EditingFormData['model'];
+    const [genStreamEnabled, setGenStreamEnabled] = React.useState(false);
 
     const normalizeRevisedPrompt = React.useCallback((value: unknown): string | undefined => {
         return typeof value === 'string' && value.trim() ? value : undefined;
@@ -178,8 +309,10 @@ export default function HomePage() {
     }, []);
 
     React.useEffect(() => {
+        setBaseUrlDraft(settings.baseUrl);
         setApiKeyDraft(settings.apiKey);
-    }, [settings.apiKey]);
+        setModelDraft(settings.models[0] ?? 'gpt-image-2');
+    }, [settings.baseUrl, settings.apiKey, settings.models]);
 
     const currentTheme = isThemeMounted ? (resolvedTheme ?? 'dark') : 'dark';
 
@@ -187,14 +320,113 @@ export default function HomePage() {
         setTheme(currentTheme === 'dark' ? 'light' : 'dark');
     };
 
+    const handleBaseUrlChange = (value: string) => {
+        setBaseUrlDraft(value);
+        saveSettings({
+            ...settings,
+            baseUrl: value,
+            apiKey: apiKeyDraft,
+            models: settings.models
+        });
+    };
+
     const handleApiKeyChange = (value: string) => {
         setApiKeyDraft(value);
         saveSettings({
             ...settings,
-            baseUrl: '',
-            apiKey: value
+            baseUrl: baseUrlDraft,
+            apiKey: value,
+            models: settings.models
         });
     };
+
+    const handleModelChange = (value: string) => {
+        setModelDraft(value);
+    };
+
+    const saveModelChoice = React.useCallback(
+        (value: string) => {
+            if (!value.trim()) return;
+
+            saveSettings({
+                ...settings,
+                baseUrl: baseUrlDraft,
+                apiKey: apiKeyDraft,
+                models: normalizeModelOptions(value, settings.models)
+            });
+        },
+        [apiKeyDraft, baseUrlDraft, saveSettings, settings]
+    );
+
+    const handleModelSelect = (value: string) => {
+        setModelDraft(value);
+        saveSettings({
+            ...settings,
+            baseUrl: baseUrlDraft,
+            apiKey: apiKeyDraft,
+            models: normalizeModelOptions(value, settings.models)
+        });
+    };
+
+    const tokenConsoleUrl = React.useMemo(
+        () => getTokenConsoleUrl(baseUrlDraft || settings.baseUrl),
+        [baseUrlDraft, settings.baseUrl]
+    );
+
+    const fetchModelOptions = React.useCallback(async () => {
+        if (isPasswordRequiredByBackend && !clientPasswordHash) {
+            setModelFetchError(t('page.passwordMissing'));
+            return;
+        }
+
+        setIsFetchingModels(true);
+        setModelFetchError(null);
+
+        try {
+            const response = await fetch('/api/models', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    apiKey: apiKeyDraft.trim() || undefined,
+                    baseUrl: baseUrlDraft.trim() || undefined,
+                    ...(isPasswordRequiredByBackend && clientPasswordHash ? { passwordHash: clientPasswordHash } : {})
+                })
+            });
+            const result: ModelsApiResult = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || t('page.apiRequestFailed', { status: response.status }));
+            }
+
+            setRemoteModelOptions(Array.isArray(result.models) ? result.models : []);
+        } catch (error) {
+            setRemoteModelOptions([]);
+            setModelFetchError(error instanceof Error ? error.message : t('settings.modelsFetchFailed'));
+        } finally {
+            setIsFetchingModels(false);
+        }
+    }, [apiKeyDraft, baseUrlDraft, clientPasswordHash, isPasswordRequiredByBackend, t]);
+
+    React.useEffect(() => {
+        if (isPasswordRequiredByBackend === null) return;
+
+        const timeoutId = window.setTimeout(() => {
+            fetchModelOptions();
+        }, 600);
+
+        return () => window.clearTimeout(timeoutId);
+    }, [fetchModelOptions, isPasswordRequiredByBackend]);
+
+    React.useEffect(() => {
+        const handlePointerDown = (event: PointerEvent) => {
+            if (!modelMenuRef.current?.contains(event.target as Node)) {
+                setIsModelMenuOpen(false);
+            }
+        };
+
+        document.addEventListener('pointerdown', handlePointerDown);
+        return () => document.removeEventListener('pointerdown', handlePointerDown);
+    }, []);
 
     React.useEffect(() => {
         if (!isLoading || activeRequestStartedAt === null) {
@@ -507,12 +739,14 @@ export default function HomePage() {
 
         const apiFormData = new FormData();
         const apiKey = apiKeyDraft.trim() || settings.apiKey.trim();
-        const baseUrl = defaultApiBaseUrl;
+        const baseUrl = baseUrlDraft.trim() || settings.baseUrl.trim();
 
         if (apiKey) {
             apiFormData.append('apiKey', apiKey);
         }
-        apiFormData.append('baseUrl', baseUrl);
+        if (baseUrl) {
+            apiFormData.append('baseUrl', baseUrl);
+        }
         apiFormData.append('responseLanguage', language);
 
         if (isPasswordRequiredByBackend && clientPasswordHash) {
@@ -530,50 +764,86 @@ export default function HomePage() {
         let requestOutputCompression: number | undefined;
         let requestSourceImageCount = 0;
         let requestHasMask = false;
+        let requestStreaming = false;
+        let requestPartialImages: number | undefined;
+        let requestModel: GptImageModel = selectedModel;
+        let requestImageCount = 1;
 
         if (mode === 'generate') {
             const genData = formData as GenerationFormData;
-            apiFormData.append('model', genModel);
-            apiFormData.append('prompt', genPrompt);
-            apiFormData.append('n', genN[0].toString());
+            requestModel = genData.model;
+            requestImageCount = genData.n;
+            apiFormData.append('model', requestModel);
+            apiFormData.append('prompt', genData.prompt);
+            apiFormData.append('n', genData.n.toString());
             const genSizeToSend =
-                genSize === 'custom'
-                    ? `${genCustomWidth}x${genCustomHeight}`
-                    : (getPresetDimensions(genSize, genModel) ?? genSize);
+                genData.size === 'custom'
+                    ? `${genData.customWidth}x${genData.customHeight}`
+                    : (getPresetDimensions(genData.size, requestModel) ?? genData.size);
             requestSize = genSizeToSend;
             apiFormData.append('size', genSizeToSend);
-            apiFormData.append('quality', genQuality);
-            apiFormData.append('output_format', genOutputFormat);
+            apiFormData.append('quality', genData.quality);
+            apiFormData.append('output_format', genData.output_format);
             if (
-                (genOutputFormat === 'jpeg' || genOutputFormat === 'webp') &&
+                (genData.output_format === 'jpeg' || genData.output_format === 'webp') &&
                 genData.output_compression !== undefined
             ) {
                 requestOutputCompression = genData.output_compression;
                 apiFormData.append('output_compression', genData.output_compression.toString());
             }
-            apiFormData.append('background', genBackground);
-            apiFormData.append('moderation', genModeration);
+            apiFormData.append('background', genData.background);
+            apiFormData.append('moderation', genData.moderation);
+            if (genData.stream && genData.n === 1) {
+                requestStreaming = true;
+                requestPartialImages = genData.partialImages;
+                apiFormData.append('stream', 'true');
+                apiFormData.append('partial_images', genData.partialImages.toString());
+            }
         } else {
-            apiFormData.append('model', editModel);
-            apiFormData.append('prompt', editPrompt);
-            apiFormData.append('n', editN[0].toString());
+            const editData = formData as EditingFormData;
+            requestModel = editData.model;
+            requestImageCount = editData.n;
+            apiFormData.append('model', requestModel);
+            apiFormData.append('prompt', editData.prompt);
+            apiFormData.append('n', editData.n.toString());
             const editSizeToSend =
-                editSize === 'custom'
-                    ? `${editCustomWidth}x${editCustomHeight}`
-                    : (getPresetDimensions(editSize, editModel) ?? editSize);
+                editData.size === 'custom'
+                    ? `${editData.customWidth}x${editData.customHeight}`
+                    : (getPresetDimensions(editData.size, requestModel) ?? editData.size);
             requestSize = editSizeToSend;
-            requestSourceImageCount = editImageFiles.length;
-            requestHasMask = !!editGeneratedMaskFile;
+            requestSourceImageCount = editData.imageFiles.length;
+            requestHasMask = !!editData.maskFile;
             apiFormData.append('size', editSizeToSend);
-            apiFormData.append('quality', editQuality);
+            apiFormData.append('quality', editData.quality);
 
-            editImageFiles.forEach((file, index) => {
+            editData.imageFiles.forEach((file, index) => {
                 apiFormData.append(`image_${index}`, file, file.name);
             });
-            if (editGeneratedMaskFile) {
-                apiFormData.append('mask', editGeneratedMaskFile, editGeneratedMaskFile.name);
+            if (editData.maskFile) {
+                apiFormData.append('mask', editData.maskFile, editData.maskFile.name);
             }
         }
+
+        setApiResponseInfo({
+            status: 'loading',
+            endpoint: '/api/images',
+            method: 'POST',
+            startedAt: startTime,
+            mode,
+            model: requestModel,
+            size: requestSize,
+            n: requestImageCount,
+            stream: requestStreaming,
+            partialImages: requestPartialImages,
+            storageMode: effectiveStorageModeClient,
+            streamingStats: requestStreaming
+                ? {
+                      partialImages: 0,
+                      completedImages: 0,
+                      doneReceived: false
+                  }
+                : undefined
+        });
 
         try {
             const response = await fetch('/api/images', {
@@ -583,7 +853,21 @@ export default function HomePage() {
 
             // Check if response is SSE (streaming)
             const contentType = response.headers.get('content-type');
+            const responseKind = contentType?.includes('text/event-stream') ? 'event-stream' : 'json';
+            setApiResponseInfo((current) =>
+                current
+                    ? {
+                          ...current,
+                          httpStatus: response.status,
+                          contentType,
+                          responseKind
+                      }
+                    : current
+            );
             if (contentType?.includes('text/event-stream')) {
+                if (!response.ok) {
+                    throw new Error(t('page.apiRequestFailed', { status: response.status }));
+                }
                 if (!response.body) {
                     throw new Error(t('page.unexpectedError'));
                 }
@@ -591,6 +875,158 @@ export default function HomePage() {
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
+                let hasSavedStreamingHistory = false;
+                const streamedImages: Array<ApiImageResponseItem | undefined> = [];
+                let streamingPartialImages = 0;
+                let streamingCompletedImages = 0;
+                let streamingDoneReceived = false;
+
+                const fallbackOutputFormat = mode === 'generate' ? (formData as GenerationFormData).output_format : 'png';
+                const historyPrompt = mode === 'generate' ? (formData as GenerationFormData).prompt : (formData as EditingFormData).prompt;
+
+                const getOrderedStreamedImages = () =>
+                    streamedImages.filter((image): image is ApiImageResponseItem => Boolean(image));
+
+                const updateStreamingStats = () => {
+                    setApiResponseInfo((current) =>
+                        current
+                            ? {
+                                  ...current,
+                                  imageCount: getOrderedStreamedImages().length,
+                                  filenames: getOrderedStreamedImages().map((image) => image.filename),
+                                  streamingStats: {
+                                      partialImages: streamingPartialImages,
+                                      completedImages: streamingCompletedImages,
+                                      doneReceived: streamingDoneReceived
+                                  }
+                              }
+                            : current
+                    );
+                };
+
+                const displayStreamingImages = async () => {
+                    const processedImages = (await Promise.all(getOrderedStreamedImages().map(cacheApiImageForDisplay))).filter(
+                        Boolean
+                    ) as ImageBatchItem[];
+
+                    if (processedImages.length > 0) {
+                        setLatestImageBatch(processedImages);
+                        setLatestBatchPrompt(historyPrompt);
+                        setImageOutputView(0);
+                    }
+                };
+
+                const normalizeStreamingImage = (image: Partial<ApiImageResponseItem>): ApiImageResponseItem | null => {
+                    if (!image.filename) {
+                        return null;
+                    }
+
+                    return {
+                        filename: image.filename,
+                        output_format: image.output_format || fallbackOutputFormat,
+                        ...(image.b64_json ? { b64_json: image.b64_json } : {}),
+                        ...(image.path ? { path: image.path } : {}),
+                        ...(normalizeRevisedPrompt(image.revised_prompt)
+                            ? { revised_prompt: normalizeRevisedPrompt(image.revised_prompt) }
+                            : {})
+                    };
+                };
+
+                const finalizeStreamingImages = async (
+                    images: ApiImageResponseItem[],
+                    revisedPromptFallback?: unknown,
+                    usage?: ApiUsageForCost
+                ) => {
+                    if (hasSavedStreamingHistory) {
+                        return;
+                    }
+
+                    const finalImages = images.length > 0 ? images : getOrderedStreamedImages();
+                    if (finalImages.length === 0) {
+                        throw new Error(t('page.apiNoImages'));
+                    }
+
+                    durationMs = Date.now() - startTime;
+
+                    let historyQuality: GenerationFormData['quality'] = 'auto';
+                    let historyBackground: GenerationFormData['background'] = 'auto';
+                    let historyModeration: GenerationFormData['moderation'] = 'auto';
+                    let historyOutputFormat: GenerationFormData['output_format'] = 'png';
+
+                    if (mode === 'generate') {
+                        const genData = formData as GenerationFormData;
+                        historyQuality = genData.quality;
+                        historyBackground = genData.background;
+                        historyModeration = genData.moderation;
+                        historyOutputFormat = genData.output_format;
+                    } else {
+                        const editData = formData as EditingFormData;
+                        historyQuality = editData.quality;
+                    }
+
+                    const revisedPrompt = getBatchRevisedPrompt(finalImages, revisedPromptFallback);
+                    const costDetails = calculateApiCost(usage, requestModel);
+
+                    setApiResponseInfo((current) =>
+                        current
+                            ? {
+                                  ...current,
+                                  status: 'success',
+                                  durationMs,
+                                  imageCount: finalImages.length,
+                                  filenames: finalImages.map((image) => image.filename),
+                                  costUsd: costDetails?.estimated_cost_usd,
+                                  streamingStats: {
+                                      partialImages: streamingPartialImages,
+                                      completedImages: streamingCompletedImages,
+                                      doneReceived: streamingDoneReceived
+                                  }
+                              }
+                            : current
+                    );
+
+                    const batchTimestamp = Date.now();
+                    const newHistoryEntry: HistoryMetadata = {
+                        timestamp: batchTimestamp,
+                        images: finalImages.map((img) => ({
+                            filename: img.filename,
+                            ...(normalizeRevisedPrompt(img.revised_prompt)
+                                ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
+                                : {})
+                        })),
+                        storageModeUsed: effectiveStorageModeClient,
+                        durationMs: durationMs,
+                        quality: historyQuality,
+                        background: historyBackground,
+                        moderation: historyModeration,
+                        output_format: historyOutputFormat,
+                        prompt: historyPrompt,
+                        revisedPrompt,
+                        mode: mode,
+                        costDetails: costDetails,
+                        model: requestModel,
+                        size: requestSize,
+                        output_compression: requestOutputCompression,
+                        streaming: requestStreaming,
+                        partialImages: requestPartialImages,
+                        sourceImageCount: requestSourceImageCount,
+                        hasMask: requestHasMask
+                    };
+
+                    const processedImages = (await Promise.all(finalImages.map(cacheApiImageForDisplay))).filter(
+                        Boolean
+                    ) as ImageBatchItem[];
+
+                    if (processedImages.length === 0) {
+                        throw new Error(t('page.apiNoImages'));
+                    }
+
+                    setLatestImageBatch(processedImages);
+                    setLatestBatchPrompt(historyPrompt);
+                    setImageOutputView(0);
+                    setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
+                    hasSavedStreamingHistory = true;
+                };
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -610,86 +1046,51 @@ export default function HomePage() {
 
                                 if (event.type === 'partial_image') {
                                     // Streaming previews are intentionally hidden in the UI.
+                                    streamingPartialImages += 1;
+                                    updateStreamingStats();
                                     continue;
                                 } else if (event.type === 'error') {
                                     throw new Error(event.error || t('page.streamingError'));
-                                } else if (event.type === 'done') {
-                                    // Finalize with all completed images
-                                    durationMs = Date.now() - startTime;
+                                } else if (event.type === 'completed') {
+                                    const completedImage = normalizeStreamingImage({
+                                        filename: event.filename,
+                                        b64_json: event.b64_json,
+                                        output_format: event.output_format,
+                                        path: event.path,
+                                        revised_prompt: event.revised_prompt
+                                    });
 
-                                    if (event.images && event.images.length > 0) {
-                                        let historyQuality: GenerationFormData['quality'] = 'auto';
-                                        let historyBackground: GenerationFormData['background'] = 'auto';
-                                        let historyModeration: GenerationFormData['moderation'] = 'auto';
-                                        let historyOutputFormat: GenerationFormData['output_format'] = 'png';
-                                        let historyPrompt: string = '';
-
-                                        if (mode === 'generate') {
-                                            historyQuality = genQuality;
-                                            historyBackground = genBackground;
-                                            historyModeration = genModeration;
-                                            historyOutputFormat = genOutputFormat;
-                                            historyPrompt = genPrompt;
-                                        } else {
-                                            historyQuality = editQuality;
-                                            historyBackground = 'auto';
-                                            historyModeration = 'auto';
-                                            historyOutputFormat = 'png';
-                                            historyPrompt = editPrompt;
-                                        }
-
-                                        const currentModel = mode === 'generate' ? genModel : editModel;
-                                        const eventImages = event.images as ApiImageResponseItem[];
-                                        const revisedPrompt = getBatchRevisedPrompt(eventImages, event.revised_prompt);
-                                        const costDetails = calculateApiCost(event.usage, currentModel);
-
-                                        const batchTimestamp = Date.now();
-                                        const newHistoryEntry: HistoryMetadata = {
-                                            timestamp: batchTimestamp,
-                                            images: eventImages.map((img) => ({
-                                                filename: img.filename,
-                                                ...(normalizeRevisedPrompt(img.revised_prompt)
-                                                    ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
-                                                    : {})
-                                            })),
-                                            storageModeUsed: effectiveStorageModeClient,
-                                            durationMs: durationMs,
-                                            quality: historyQuality,
-                                            background: historyBackground,
-                                            moderation: historyModeration,
-                                            output_format: historyOutputFormat,
-                                            prompt: historyPrompt,
-                                            revisedPrompt,
-                                            mode: mode,
-                                            costDetails: costDetails,
-                                            model: currentModel,
-                                            size: requestSize,
-                                            output_compression: requestOutputCompression,
-                                            streaming: false,
-                                            sourceImageCount: requestSourceImageCount,
-                                            hasMask: requestHasMask
-                                        };
-
-                                        const newImageBatchPromises = eventImages.map((img) =>
-                                            cacheApiImageForDisplay(img)
-                                        );
-
-                                        const processedImages = (await Promise.all(newImageBatchPromises)).filter(
-                                            Boolean
-                                        ) as ImageBatchItem[];
-
-                                        setLatestImageBatch(processedImages);
-                                        setLatestBatchPrompt(historyPrompt);
-                                        setImageOutputView(processedImages.length > 0 ? 0 : 'grid');
-
-                                        setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
+                                    if (completedImage) {
+                                        const imageIndex =
+                                            typeof event.index === 'number' ? event.index : streamedImages.length;
+                                        streamedImages[imageIndex] = completedImage;
+                                        streamingCompletedImages += 1;
+                                        updateStreamingStats();
+                                        await displayStreamingImages();
                                     }
+                                } else if (event.type === 'done') {
+                                    streamingDoneReceived = true;
+                                    updateStreamingStats();
+                                    const eventImages = Array.isArray(event.images)
+                                        ? (event.images
+                                              .map((image: Partial<ApiImageResponseItem>) =>
+                                                  normalizeStreamingImage(image)
+                                              )
+                                              .filter(Boolean) as ApiImageResponseItem[])
+                                        : [];
+
+                                    await finalizeStreamingImages(eventImages, event.revised_prompt, event.usage);
                                 }
                             } catch (parseError) {
                                 console.error('Error parsing SSE event:', parseError);
+                                throw parseError;
                             }
                         }
                     }
+                }
+
+                if (!hasSavedStreamingHistory && getOrderedStreamedImages().length > 0) {
+                    await finalizeStreamingImages(getOrderedStreamedImages());
                 }
 
                 return; // Exit early for streaming
@@ -701,6 +1102,16 @@ export default function HomePage() {
             if (!response.ok) {
                 if (response.status === 401 && isPasswordRequiredByBackend) {
                     setError(t('page.unauthorized'));
+                    setApiResponseInfo((current) =>
+                        current
+                            ? {
+                                  ...current,
+                                  status: 'error',
+                                  durationMs: Date.now() - startTime,
+                                  error: t('page.unauthorized')
+                              }
+                            : current
+                    );
                     setPasswordDialogContext('retry');
                     setLastApiCallArgs([formData]);
                     setIsPasswordDialogOpen(true);
@@ -720,22 +1131,35 @@ export default function HomePage() {
                 let historyPrompt: string = '';
 
                 if (mode === 'generate') {
-                    historyQuality = genQuality;
-                    historyBackground = genBackground;
-                    historyModeration = genModeration;
-                    historyOutputFormat = genOutputFormat;
-                    historyPrompt = genPrompt;
+                    const genData = formData as GenerationFormData;
+                    historyQuality = genData.quality;
+                    historyBackground = genData.background;
+                    historyModeration = genData.moderation;
+                    historyOutputFormat = genData.output_format;
+                    historyPrompt = genData.prompt;
                 } else {
-                    historyQuality = editQuality;
+                    const editData = formData as EditingFormData;
+                    historyQuality = editData.quality;
                     historyBackground = 'auto';
                     historyModeration = 'auto';
                     historyOutputFormat = 'png';
-                    historyPrompt = editPrompt;
+                    historyPrompt = editData.prompt;
                 }
 
-                const currentModel = mode === 'generate' ? genModel : editModel;
                 const revisedPrompt = getBatchRevisedPrompt(result.images, result.revised_prompt);
-                const costDetails = calculateApiCost(result.usage, currentModel);
+                const costDetails = calculateApiCost(result.usage, requestModel);
+                setApiResponseInfo((current) =>
+                    current
+                        ? {
+                              ...current,
+                              status: 'success',
+                              durationMs,
+                              imageCount: result.images?.length ?? 0,
+                              filenames: result.images?.map((image) => image.filename) ?? [],
+                              costUsd: costDetails?.estimated_cost_usd
+                          }
+                        : current
+                );
 
                 const batchTimestamp = Date.now();
                 const newHistoryEntry: HistoryMetadata = {
@@ -756,10 +1180,11 @@ export default function HomePage() {
                     revisedPrompt,
                     mode: mode,
                     costDetails: costDetails,
-                    model: currentModel,
+                    model: requestModel,
                     size: requestSize,
                     output_compression: requestOutputCompression,
-                    streaming: false,
+                    streaming: requestStreaming,
+                    partialImages: requestPartialImages,
                     sourceImageCount: requestSourceImageCount,
                     hasMask: requestHasMask
                 };
@@ -785,6 +1210,16 @@ export default function HomePage() {
             console.error(`API Call Error after ${durationMs}ms:`, err);
             const errorMessage = err instanceof Error ? err.message : t('page.unexpectedError');
             setError(errorMessage);
+            setApiResponseInfo((current) =>
+                current
+                    ? {
+                          ...current,
+                          status: 'error',
+                          durationMs,
+                          error: errorMessage
+                      }
+                    : current
+            );
             setLatestImageBatch(null);
             setLatestBatchPrompt('');
         } finally {
@@ -1002,6 +1437,62 @@ export default function HomePage() {
         setItemToDeleteConfirm(null);
     }, []);
 
+    const apiInfoStatusLabel =
+        apiResponseInfo?.status === 'loading'
+            ? t('apiInfo.statusLoading')
+            : apiResponseInfo?.status === 'success'
+              ? t('apiInfo.statusSuccess')
+              : apiResponseInfo?.status === 'error'
+                ? t('apiInfo.statusError')
+                : '-';
+    const apiInfoStatusClass =
+        apiResponseInfo?.status === 'success'
+            ? 'border-emerald-300/40 bg-emerald-400/10 text-emerald-300'
+            : apiResponseInfo?.status === 'error'
+              ? 'border-red-400/40 bg-red-500/10 text-red-300'
+              : 'border-blue-300/40 bg-blue-400/10 text-blue-300';
+    const apiInfoDuration =
+        apiResponseInfo?.status === 'loading'
+            ? formatApiDuration(Date.now() - apiResponseInfo.startedAt)
+            : formatApiDuration(apiResponseInfo?.durationMs);
+    const apiInfoRows: Array<[string, string]> = apiResponseInfo
+        ? [
+              [t('apiInfo.status'), apiInfoStatusLabel],
+              [
+                  t('apiInfo.httpStatus'),
+                  apiResponseInfo.httpStatus ? `${apiResponseInfo.httpStatus}` : '-'
+              ],
+              [t('apiInfo.duration'), apiInfoDuration],
+              [t('apiInfo.responseType'), apiResponseInfo.responseKind || formatContentType(apiResponseInfo.contentType)],
+              [t('apiInfo.endpoint'), `${apiResponseInfo.method} ${apiResponseInfo.endpoint}`],
+              [t('common.model'), apiResponseInfo.model],
+              [t('common.size'), apiResponseInfo.size || '-'],
+              [t('history.imageCount'), `${apiResponseInfo.n}`],
+              [t('apiInfo.streaming'), apiResponseInfo.stream ? t('common.yes') : t('common.no')],
+              [t('apiInfo.storage'), apiResponseInfo.storageMode],
+              [
+                  t('apiInfo.imageCount'),
+                  apiResponseInfo.imageCount === undefined ? '-' : `${apiResponseInfo.imageCount}`
+              ],
+              [
+                  t('apiInfo.cost'),
+                  apiResponseInfo.costUsd === undefined ? '-' : formatUsdCny(apiResponseInfo.costUsd)
+              ]
+          ]
+        : [];
+
+    if (apiResponseInfo?.stream) {
+        apiInfoRows.push(
+            [
+                t('apiInfo.partialImages'),
+                `${apiResponseInfo.streamingStats?.partialImages ?? 0}${
+                    apiResponseInfo.partialImages ? ` / ${apiResponseInfo.partialImages}` : ''
+                }`
+            ],
+            [t('apiInfo.completedImages'), `${apiResponseInfo.streamingStats?.completedImages ?? 0}`]
+        );
+    }
+
     return (
         <main className='min-h-screen bg-black p-3 text-white md:p-4 lg:h-screen lg:overflow-hidden'>
             <PasswordDialog
@@ -1017,19 +1508,155 @@ export default function HomePage() {
             />
             <div className='flex min-h-screen w-full flex-col gap-3 lg:h-full lg:min-h-0'>
                 <header className='shrink-0 rounded-lg border border-white/10 bg-black/95 px-4 py-3 shadow-sm'>
-                    <div className='flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between'>
-                        <div className='min-w-0'>
-                            <p className='text-xs font-medium tracking-[0.16em] text-white/45 uppercase'>
-                                {t('home.kicker')}
-                            </p>
-                            <h1 className='mt-0.5 text-2xl font-semibold text-white md:text-3xl'>{t('home.title')}</h1>
-                            <p className='mt-1 text-sm text-white/55'>
-                                {t('home.fixedEndpoint', { url: defaultApiBaseUrl })}
-                            </p>
+                    <div className='flex flex-col gap-3'>
+                        <div className='flex flex-col gap-3 md:flex-row md:items-center md:justify-between'>
+                            <div className='min-w-0'>
+                                <p className='text-xs font-medium tracking-[0.16em] text-white/45 uppercase'>
+                                    {t('home.kicker')}
+                                </p>
+                                <h1 className='mt-0.5 truncate text-2xl font-semibold text-white'>{t('home.title')}</h1>
+                            </div>
+
+                            <div className='flex shrink-0 items-center gap-2 md:justify-end'>
+                                <Languages className='h-4 w-4 text-white/45' />
+                                <Select
+                                    value={languagePreference}
+                                    onValueChange={(value) => setLanguagePreference(value as LanguagePreference)}>
+                                    <SelectTrigger
+                                        aria-label={t('settings.languageAria')}
+                                        className='h-8 w-[132px] border-white/20 bg-black text-sm text-white focus:border-white/50 focus:ring-white/50'>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent className='border-white/20 bg-black text-white'>
+                                        <SelectItem value='system' className='focus:bg-white/10'>
+                                            {t('settings.system')}
+                                        </SelectItem>
+                                        <SelectItem value='en' className='focus:bg-white/10'>
+                                            {t('settings.english')}
+                                        </SelectItem>
+                                        <SelectItem value='zh' className='focus:bg-white/10'>
+                                            {t('settings.chinese')}
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <Button
+                                    type='button'
+                                    variant='outline'
+                                    size='icon'
+                                    onClick={handleThemeToggle}
+                                    className='h-8 w-8 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
+                                    aria-label={t('home.toggleTheme')}>
+                                    {currentTheme === 'dark' ? (
+                                        <Moon className='h-4 w-4' />
+                                    ) : (
+                                        <Sun className='h-4 w-4' />
+                                    )}
+                                </Button>
+                            </div>
                         </div>
 
-                        <div className='grid gap-2 sm:grid-cols-[minmax(360px,520px)_140px_44px] sm:items-start'>
+                        <div className='grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,0.85fr)_minmax(220px,0.85fr)_minmax(340px,1.3fr)] xl:items-start'>
                             <div className='min-w-0'>
+                                <Label
+                                    htmlFor='home-api-base-url'
+                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
+                                    <Globe2 className='h-3.5 w-3.5' />
+                                    {t('settings.baseUrl')}
+                                </Label>
+                                <Input
+                                    id='home-api-base-url'
+                                    type='url'
+                                    value={baseUrlDraft}
+                                    onChange={(event) => handleBaseUrlChange(event.target.value)}
+                                    placeholder={t('settings.baseUrlPlaceholder')}
+                                    className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
+                                />
+                            </div>
+
+                            <div ref={modelMenuRef} className='relative min-w-0'>
+                                <Label
+                                    htmlFor='home-model'
+                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
+                                    <Cpu className='h-3.5 w-3.5' />
+                                    {t('common.model')}
+                                </Label>
+                                <div className='flex gap-2'>
+                                    <Input
+                                        id='home-model'
+                                        value={modelDraft}
+                                        onChange={(event) => {
+                                            handleModelChange(event.target.value);
+                                            setIsModelMenuOpen(true);
+                                        }}
+                                        onFocus={() => setIsModelMenuOpen(true)}
+                                        onBlur={(event) => {
+                                            const nextFocusedElement = event.relatedTarget;
+                                            if (
+                                                nextFocusedElement &&
+                                                modelMenuRef.current?.contains(nextFocusedElement)
+                                            ) {
+                                                return;
+                                            }
+
+                                            saveModelChoice(modelDraft);
+                                        }}
+                                        placeholder={t('settings.modelPlaceholder')}
+                                        className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
+                                    />
+                                    <Button
+                                        type='button'
+                                        variant='outline'
+                                        size='icon'
+                                        onClick={() => {
+                                            setIsModelMenuOpen((current) => !current);
+                                            fetchModelOptions();
+                                        }}
+                                        className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
+                                        aria-label={t('settings.models')}>
+                                        {isFetchingModels ? (
+                                            <Loader2 className='h-4 w-4 animate-spin' />
+                                        ) : (
+                                            <ChevronDown className='h-4 w-4' />
+                                        )}
+                                    </Button>
+                                </div>
+                                {isModelMenuOpen && (
+                                    <div className='absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-white/20 bg-black p-1 text-sm text-white shadow-lg'>
+                                        {isFetchingModels && (
+                                            <div className='flex items-center gap-2 px-2 py-2 text-xs text-white/50'>
+                                                <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                                                {t('settings.modelsLoading')}
+                                            </div>
+                                        )}
+                                        {!isFetchingModels &&
+                                            filteredModelOptions.map((model) => (
+                                                <button
+                                                    key={model}
+                                                    type='button'
+                                                    onMouseDown={(event) => event.preventDefault()}
+                                                    onClick={() => {
+                                                        handleModelSelect(model);
+                                                        setIsModelMenuOpen(false);
+                                                    }}
+                                                    className='block w-full rounded px-2 py-1.5 text-left text-white/80 hover:bg-white/10 hover:text-white'>
+                                                    {model}
+                                                </button>
+                                            ))}
+                                        {!isFetchingModels && filteredModelOptions.length === 0 && (
+                                            <div className='px-2 py-2 text-xs text-white/45'>
+                                                {modelFetchError || t('settings.noModelsFound')}
+                                            </div>
+                                        )}
+                                        {!isFetchingModels && filteredModelOptions.length > 0 && modelFetchError && (
+                                            <div className='border-t border-white/10 px-2 py-1.5 text-xs text-yellow-300/80'>
+                                                {modelFetchError}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className='min-w-0 md:col-span-2 xl:col-span-1'>
                                 <Label
                                     htmlFor='home-api-key'
                                     className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
@@ -1055,67 +1682,41 @@ export default function HomePage() {
                                         {showApiKey ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
                                     </Button>
                                     <Button
-                                        asChild
+                                        asChild={Boolean(tokenConsoleUrl)}
                                         type='button'
                                         variant='outline'
+                                        disabled={!tokenConsoleUrl}
                                         className='h-9 shrink-0 border-white/20 px-2.5 text-xs text-white/75 hover:bg-white/10 hover:text-white'>
-                                        <a
-                                            href='https://api.774966.xyz/console/token'
-                                            target='_blank'
-                                            rel='noreferrer'
-                                            aria-label={t('home.getApiKeyAria')}>
-                                            <ExternalLink className='h-3.5 w-3.5' />
-                                            {t('home.getApiKey')}
-                                        </a>
+                                        {tokenConsoleUrl ? (
+                                            <a
+                                                href={tokenConsoleUrl}
+                                                target='_blank'
+                                                rel='noreferrer'
+                                                aria-label={t('home.getApiKeyAria')}>
+                                                <ExternalLink className='h-3.5 w-3.5' />
+                                                {t('home.getApiKey')}
+                                            </a>
+                                        ) : (
+                                            <>
+                                                <ExternalLink className='h-3.5 w-3.5' />
+                                                {t('home.getApiKey')}
+                                            </>
+                                        )}
                                     </Button>
                                 </div>
                             </div>
+                        </div>
 
-                            <div className='min-w-0'>
-                                <p className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
-                                    <Languages className='h-3.5 w-3.5' />
-                                    {t('settings.language')}
-                                </p>
-                                <Select
-                                    value={languagePreference}
-                                    onValueChange={(value) => setLanguagePreference(value as LanguagePreference)}>
-                                    <SelectTrigger
-                                        aria-label={t('settings.languageAria')}
-                                        className='h-9 w-full border-white/20 bg-black text-white focus:border-white/50 focus:ring-white/50'>
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent className='border-white/20 bg-black text-white'>
-                                        <SelectItem value='system' className='focus:bg-white/10'>
-                                            {t('settings.system')}
-                                        </SelectItem>
-                                        <SelectItem value='en' className='focus:bg-white/10'>
-                                            {t('settings.english')}
-                                        </SelectItem>
-                                        <SelectItem value='zh' className='focus:bg-white/10'>
-                                            {t('settings.chinese')}
-                                        </SelectItem>
-                                    </SelectContent>
-                                </Select>
-                            </div>
-
-                            <div>
-                                <p className='mb-1.5 text-xs font-medium text-white/70'>{t('settings.theme')}</p>
-                                <Button
-                                    type='button'
-                                    variant='outline'
-                                    size='icon'
-                                    onClick={handleThemeToggle}
-                                    className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
-                                    aria-label={t('home.toggleTheme')}>
-                                    {currentTheme === 'dark' ? (
-                                        <Moon className='h-4 w-4' />
-                                    ) : (
-                                        <Sun className='h-4 w-4' />
-                                    )}
-                                </Button>
-                            </div>
-
-                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45 sm:col-span-3'>
+                        <div className='flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2'>
+                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
+                                {baseUrlDraft.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
+                                {t('settings.baseUrlHelp')}
+                            </p>
+                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
+                                {selectedModel.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
+                                {t('home.modelHelp')}
+                            </p>
+                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
                                 {apiKeyDraft.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
                                 {t('home.apiKeyHelp')}
                             </p>
@@ -1134,7 +1735,7 @@ export default function HomePage() {
                                 isPasswordRequiredByBackend={isPasswordRequiredByBackend}
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
-                                model={genModel}
+                                model={selectedModel}
                                 prompt={genPrompt}
                                 setPrompt={setGenPrompt}
                                 n={genN}
@@ -1155,6 +1756,8 @@ export default function HomePage() {
                                 setBackground={setGenBackground}
                                 moderation={genModeration}
                                 setModeration={setGenModeration}
+                                streamEnabled={genStreamEnabled}
+                                setStreamEnabled={setGenStreamEnabled}
                             />
                         </div>
                         <div className={mode === 'edit' ? 'block h-full w-full' : 'hidden'}>
@@ -1166,7 +1769,7 @@ export default function HomePage() {
                                 isPasswordRequiredByBackend={isPasswordRequiredByBackend}
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
-                                editModel={editModel}
+                                editModel={selectedModel}
                                 imageFiles={editImageFiles}
                                 sourceImagePreviewUrls={editSourceImagePreviewUrls}
                                 setImageFiles={setEditImageFiles}
@@ -1209,6 +1812,70 @@ export default function HomePage() {
                                 <AlertDescription>{error}</AlertDescription>
                             </Alert>
                         )}
+                        <div className='mb-3 shrink-0 rounded-lg border border-white/10 bg-black/95'>
+                            <button
+                                type='button'
+                                onClick={() => setShowApiResponseInfo((current) => !current)}
+                                className='flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-white/80 hover:bg-white/5'>
+                                <span className='flex min-w-0 items-center gap-2'>
+                                    <ChevronDown
+                                        className={`h-4 w-4 shrink-0 transition-transform ${
+                                            showApiResponseInfo ? 'rotate-180' : ''
+                                        }`}
+                                    />
+                                    <span className='font-medium'>{t('apiInfo.toggle')}</span>
+                                    {apiResponseInfo && (
+                                        <span
+                                            className={`rounded-full border px-2 py-0.5 text-[11px] ${apiInfoStatusClass}`}>
+                                            {apiInfoStatusLabel}
+                                        </span>
+                                    )}
+                                </span>
+                                <span className='shrink-0 text-xs text-white/45'>{apiInfoDuration}</span>
+                            </button>
+
+                            {showApiResponseInfo && (
+                                <div className='border-t border-white/10 p-3'>
+                                    {!apiResponseInfo ? (
+                                        <p className='text-xs text-white/45'>{t('apiInfo.empty')}</p>
+                                    ) : (
+                                        <div className='space-y-3'>
+                                            <div className='grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-3'>
+                                                {apiInfoRows.map(([label, value]) => (
+                                                    <div
+                                                        key={label}
+                                                        className='min-w-0 rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5'>
+                                                        <p className='truncate text-white/40'>{label}</p>
+                                                        <p className='mt-0.5 truncate font-medium text-white/80'>
+                                                            {value}
+                                                        </p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {apiResponseInfo.filenames && apiResponseInfo.filenames.length > 0 && (
+                                                <div className='rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-xs'>
+                                                    <p className='mb-1 text-white/40'>{t('apiInfo.files')}</p>
+                                                    <div className='flex flex-wrap gap-1.5'>
+                                                        {apiResponseInfo.filenames.map((filename) => (
+                                                            <span
+                                                                key={filename}
+                                                                className='rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-white/70'>
+                                                                {filename}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {apiResponseInfo.error && (
+                                                <div className='rounded-md border border-red-400/30 bg-red-500/10 px-2 py-1.5 text-xs text-red-200'>
+                                                    {apiResponseInfo.error}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                         <div className='min-h-0 flex-1'>
                             <ImageOutput
                                 imageBatch={latestImageBatch}

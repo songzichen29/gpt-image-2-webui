@@ -163,17 +163,10 @@ export function EditingForm({
     const { t } = useI18n();
     const [firstImagePreviewUrl, setFirstImagePreviewUrl] = React.useState<string | null>(null);
 
-    const isGptImage2 = editModel === 'gpt-image-2';
+    const supportsCustomSize = true;
     const customSizeValidation =
         editSize === 'custom' ? validateGptImage2Size(editCustomWidth, editCustomHeight) : { valid: true as const };
     const customSizeInvalid = editSize === 'custom' && !customSizeValidation.valid;
-
-    // 'custom' is only valid on gpt-image-2; reset when switching to a legacy model
-    React.useEffect(() => {
-        if (!isGptImage2 && editSize === 'custom') {
-            setEditSize('square');
-        }
-    }, [isGptImage2, editSize, setEditSize]);
 
     const canvasRef = React.useRef<HTMLCanvasElement>(null);
     const visualFeedbackCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -773,7 +766,7 @@ export function EditingForm({
                                 </TooltipTrigger>
                                 <TooltipContent>{getPresetTooltip('portrait', editModel)}</TooltipContent>
                             </Tooltip>
-                            {isGptImage2 && (
+                            {supportsCustomSize && (
                                 <RadioItemWithIcon
                                     value='custom'
                                     id='edit-size-custom'
@@ -782,7 +775,7 @@ export function EditingForm({
                                 />
                             )}
                         </RadioGroup>
-                        {isGptImage2 && editSize === 'custom' && (
+                        {supportsCustomSize && editSize === 'custom' && (
                             <div className='space-y-2 rounded-md border border-white/10 bg-white/5 p-3'>
                                 <div className='flex items-center gap-3'>
                                     <div className='flex-1 space-y-1'>

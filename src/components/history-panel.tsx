@@ -102,7 +102,7 @@ function HistoryPanelImpl({
                         <Dialog open={isTotalCostDialogOpen} onOpenChange={setIsTotalCostDialogOpen}>
                             <DialogTrigger asChild>
                                 <button
-                                    className='mt-0.5 flex items-center gap-1 rounded-full bg-green-600/80 px-1.5 py-0.5 text-[12px] text-white transition-colors hover:bg-green-500/90'
+                                    className='mt-0.5 flex items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[12px] font-medium text-emerald-900 transition-colors hover:bg-emerald-200 dark:bg-green-600/80 dark:text-white dark:hover:bg-green-500/90'
                                     aria-label={t('history.showTotalCostAria')}>
                                     {t('history.totalCost', { cost: formatUsdCny(totalCost) })}
                                 </button>
@@ -256,7 +256,7 @@ function HistoryPanelImpl({
                                             <p className='mt-0.5 truncate text-[11px] text-white/45'>{generatedDate}</p>
                                         </button>
                                         {cost !== undefined && (
-                                            <span className='shrink-0 rounded-full bg-green-600/15 px-1.5 py-0.5 text-[11px] font-medium text-green-300'>
+                                            <span className='shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-transparent dark:bg-green-600/15 dark:text-green-300'>
                                                 ${cost.toFixed(4)}
                                             </span>
                                         )}
@@ -343,8 +343,8 @@ function HistoryPanelImpl({
                                             className={cn(
                                                 'flex items-center gap-1 rounded border px-1.5 py-0.5',
                                                 expiryStatus.isExpired
-                                                    ? 'border-red-400/30 bg-red-500/10 text-red-200'
-                                                    : 'border-amber-300/30 bg-amber-300/10 text-amber-100'
+                                                    ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-200'
+                                                    : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100'
                                             )}>
                                             <Clock size={11} />
                                             {expiryStatus.isExpired

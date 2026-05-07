@@ -17,7 +17,7 @@ type StreamingEvent = {
     revised_prompt?: string;
     images?: Array<{
         filename: string;
-        b64_json: string;
+        b64_json?: string;
         path?: string;
         output_format: string;
         revised_prompt?: string;
@@ -26,7 +26,6 @@ type StreamingEvent = {
 };
 
 const outputDir = path.resolve(process.cwd(), 'generated-images');
-const DEFAULT_API_BASE_URL = 'https://api.774966.xyz/v1';
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 
 function getImageRequestTimeoutMs() {
@@ -163,6 +162,58 @@ function mergeImageUsage(
     return mergeNumericUsageValue(base, addition) as OpenAI.Images.ImagesResponse['usage'] | undefined;
 }
 
+type ImageStreamEventLike = {
+    type?: unknown;
+    b64_json?: unknown;
+    partial_image_index?: unknown;
+    usage?: unknown;
+    revised_prompt?: unknown;
+};
+
+function getStreamEventType(event: unknown): string {
+    if (!event || typeof event !== 'object' || !('type' in event)) {
+        return '';
+    }
+
+    return typeof event.type === 'string' ? event.type : '';
+}
+
+function getStreamEventKeys(event: unknown): string[] {
+    return event && typeof event === 'object' ? Object.keys(event) : [];
+}
+
+function getStreamEventB64Json(event: unknown): string | undefined {
+    if (!event || typeof event !== 'object' || !('b64_json' in event)) {
+        return undefined;
+    }
+
+    const b64Json = (event as ImageStreamEventLike).b64_json;
+
+    return typeof b64Json === 'string' && b64Json ? b64Json : undefined;
+}
+
+function getStreamEventPartialImageIndex(event: unknown): number | undefined {
+    if (!event || typeof event !== 'object' || !('partial_image_index' in event)) {
+        return undefined;
+    }
+
+    const partialImageIndex = (event as ImageStreamEventLike).partial_image_index;
+
+    return typeof partialImageIndex === 'number' ? partialImageIndex : undefined;
+}
+
+function isPartialImageStreamEvent(event: unknown): boolean {
+    const eventType = getStreamEventType(event);
+
+    return eventType.includes('partial_image') || getStreamEventPartialImageIndex(event) !== undefined;
+}
+
+function isCompletedImageStreamEvent(event: unknown): boolean {
+    const eventType = getStreamEventType(event);
+
+    return eventType.includes('completed') || Boolean(getStreamEventB64Json(event) && !isPartialImageStreamEvent(event));
+}
+
 async function fillMissingImages(
     result: OpenAI.Images.ImagesResponse,
     requestedCount: number,
@@ -268,7 +319,7 @@ export async function POST(request: NextRequest) {
         const responseLanguage = formData.get('responseLanguage');
         const acceptLanguage = getPreferredAcceptLanguage(responseLanguage, request);
         const apiKey = localApiKey || process.env.OPENAI_API_KEY;
-        const baseURL = localBaseUrl || process.env.OPENAI_API_BASE_URL || DEFAULT_API_BASE_URL;
+        const baseURL = localBaseUrl || process.env.OPENAI_API_BASE_URL?.trim();
 
         if (!apiKey) {
             console.error('No API key was provided by local settings or OPENAI_API_KEY.');
@@ -353,54 +404,68 @@ export async function POST(request: NextRequest) {
                     partial_images: actualPartialImages
                 };
 
+                console.log('Calling OpenAI generate with streaming, params:', streamParams);
                 const stream = await openai.images.generate(streamParams);
 
                 // Create SSE response
                 const encoder = new TextEncoder();
                 const timestamp = Date.now();
                 const fileExtension = validateOutputFormat(output_format);
+                const shouldInlineImageData = effectiveStorageMode !== 'fs';
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
                         try {
                             const completedImages: Array<{
                                 filename: string;
-                                b64_json: string;
+                                b64_json?: string;
                                 path?: string;
                                 output_format: string;
                                 revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
+                            let lastPartialB64Json: string | undefined;
 
                             for await (const event of stream) {
-                                if (event.type === 'image_generation.partial_image') {
+                                const eventType = getStreamEventType(event);
+                                const b64Json = getStreamEventB64Json(event);
+                                const partialImageIndex = getStreamEventPartialImageIndex(event);
+
+                                if (isPartialImageStreamEvent(event)) {
+                                    if (b64Json) {
+                                        lastPartialB64Json = b64Json;
+                                    }
                                     const partialEvent: StreamingEvent = {
                                         type: 'partial_image',
                                         index: imageIndex,
-                                        partial_image_index: event.partial_image_index,
-                                        b64_json: event.b64_json
+                                        partial_image_index: partialImageIndex,
+                                        b64_json: b64Json
                                     };
                                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`));
-                                } else if (event.type === 'image_generation.completed') {
+                                } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
                                     const revisedPrompt = getRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
-                                    if (effectiveStorageMode === 'fs' && event.b64_json) {
-                                        const buffer = Buffer.from(event.b64_json, 'base64');
+                                    if (effectiveStorageMode === 'fs' && b64Json) {
+                                        const buffer = Buffer.from(b64Json, 'base64');
                                         const filepath = path.join(outputDir, filename);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming: Saved image ${filename}`);
                                     }
 
+                                    const savedPath =
+                                        effectiveStorageMode === 'fs' && b64Json
+                                            ? `/api/image/${filename}`
+                                            : undefined;
                                     const imageData = {
                                         filename,
-                                        b64_json: event.b64_json || '',
                                         output_format: fileExtension,
+                                        ...(shouldInlineImageData && b64Json ? { b64_json: b64Json } : {}),
                                         ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
-                                        ...(effectiveStorageMode === 'fs' ? { path: `/api/image/${filename}` } : {})
+                                        ...(savedPath ? { path: savedPath } : {})
                                     };
                                     completedImages.push(imageData);
 
@@ -408,8 +473,8 @@ export async function POST(request: NextRequest) {
                                         type: 'completed',
                                         index: currentIndex,
                                         filename,
-                                        b64_json: event.b64_json,
-                                        path: effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined,
+                                        b64_json: shouldInlineImageData ? b64Json : undefined,
+                                        path: savedPath,
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
@@ -421,7 +486,40 @@ export async function POST(request: NextRequest) {
                                     if ('usage' in event && event.usage) {
                                         finalUsage = event.usage as OpenAI.Images.ImagesResponse['usage'];
                                     }
+                                } else {
+                                    console.log('Streaming: Ignored image generation event:', {
+                                        type: eventType || 'unknown',
+                                        keys: getStreamEventKeys(event)
+                                    });
                                 }
+                            }
+
+                            if (completedImages.length === 0 && lastPartialB64Json) {
+                                const filename = `${timestamp}-0.${fileExtension}`;
+                                if (effectiveStorageMode === 'fs') {
+                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
+                                    const filepath = path.join(outputDir, filename);
+                                    await fs.writeFile(filepath, buffer);
+                                }
+
+                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
+                                completedImages.push({
+                                    filename,
+                                    output_format: fileExtension,
+                                    ...(shouldInlineImageData ? { b64_json: lastPartialB64Json } : {}),
+                                    ...(savedPath ? { path: savedPath } : {})
+                                });
+                                console.warn('Streaming: No completed event received; using the last partial image.');
+
+                                const fallbackEvent: StreamingEvent = {
+                                    type: 'completed',
+                                    index: 0,
+                                    filename,
+                                    b64_json: shouldInlineImageData ? lastPartialB64Json : undefined,
+                                    path: savedPath,
+                                    output_format: fileExtension
+                                };
+                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
                             }
 
                             // Send final done event with all images and usage
@@ -510,48 +608,61 @@ export async function POST(request: NextRequest) {
                 const encoder = new TextEncoder();
                 const timestamp = Date.now();
                 const fileExtension = 'png'; // Edit mode always outputs PNG
+                const shouldInlineImageData = effectiveStorageMode !== 'fs';
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
                         try {
                             const completedImages: Array<{
                                 filename: string;
-                                b64_json: string;
+                                b64_json?: string;
                                 path?: string;
                                 output_format: string;
                                 revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
+                            let lastPartialB64Json: string | undefined;
 
                             for await (const event of stream) {
-                                if (event.type === 'image_edit.partial_image') {
+                                const eventType = getStreamEventType(event);
+                                const b64Json = getStreamEventB64Json(event);
+                                const partialImageIndex = getStreamEventPartialImageIndex(event);
+
+                                if (isPartialImageStreamEvent(event)) {
+                                    if (b64Json) {
+                                        lastPartialB64Json = b64Json;
+                                    }
                                     const partialEvent: StreamingEvent = {
                                         type: 'partial_image',
                                         index: imageIndex,
-                                        partial_image_index: event.partial_image_index,
-                                        b64_json: event.b64_json
+                                        partial_image_index: partialImageIndex,
+                                        b64_json: b64Json
                                     };
                                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`));
-                                } else if (event.type === 'image_edit.completed') {
+                                } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
                                     const revisedPrompt = getRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
-                                    if (effectiveStorageMode === 'fs' && event.b64_json) {
-                                        const buffer = Buffer.from(event.b64_json, 'base64');
+                                    if (effectiveStorageMode === 'fs' && b64Json) {
+                                        const buffer = Buffer.from(b64Json, 'base64');
                                         const filepath = path.join(outputDir, filename);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming edit: Saved image ${filename}`);
                                     }
 
+                                    const savedPath =
+                                        effectiveStorageMode === 'fs' && b64Json
+                                            ? `/api/image/${filename}`
+                                            : undefined;
                                     const imageData = {
                                         filename,
-                                        b64_json: event.b64_json || '',
                                         output_format: fileExtension,
+                                        ...(shouldInlineImageData && b64Json ? { b64_json: b64Json } : {}),
                                         ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
-                                        ...(effectiveStorageMode === 'fs' ? { path: `/api/image/${filename}` } : {})
+                                        ...(savedPath ? { path: savedPath } : {})
                                     };
                                     completedImages.push(imageData);
 
@@ -559,8 +670,8 @@ export async function POST(request: NextRequest) {
                                         type: 'completed',
                                         index: currentIndex,
                                         filename,
-                                        b64_json: event.b64_json,
-                                        path: effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined,
+                                        b64_json: shouldInlineImageData ? b64Json : undefined,
+                                        path: savedPath,
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
@@ -572,7 +683,40 @@ export async function POST(request: NextRequest) {
                                     if ('usage' in event && event.usage) {
                                         finalUsage = event.usage as OpenAI.Images.ImagesResponse['usage'];
                                     }
+                                } else {
+                                    console.log('Streaming edit: Ignored image event:', {
+                                        type: eventType || 'unknown',
+                                        keys: getStreamEventKeys(event)
+                                    });
                                 }
+                            }
+
+                            if (completedImages.length === 0 && lastPartialB64Json) {
+                                const filename = `${timestamp}-0.${fileExtension}`;
+                                if (effectiveStorageMode === 'fs') {
+                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
+                                    const filepath = path.join(outputDir, filename);
+                                    await fs.writeFile(filepath, buffer);
+                                }
+
+                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
+                                completedImages.push({
+                                    filename,
+                                    output_format: fileExtension,
+                                    ...(shouldInlineImageData ? { b64_json: lastPartialB64Json } : {}),
+                                    ...(savedPath ? { path: savedPath } : {})
+                                });
+                                console.warn('Streaming edit: No completed event received; using the last partial image.');
+
+                                const fallbackEvent: StreamingEvent = {
+                                    type: 'completed',
+                                    index: 0,
+                                    filename,
+                                    b64_json: shouldInlineImageData ? lastPartialB64Json : undefined,
+                                    path: savedPath,
+                                    output_format: fileExtension
+                                };
+                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
                             }
 
                             // Send final done event with all images and usage

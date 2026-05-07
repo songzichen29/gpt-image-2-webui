@@ -8,7 +8,7 @@ services:
     environment:
       NODE_ENV: production
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.774966.xyz/v1}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       NEXT_PUBLIC_IMAGE_STORAGE_MODE: ${NEXT_PUBLIC_IMAGE_STORAGE_MODE:-fs}
       APP_PASSWORD: ${APP_PASSWORD:-}
     volumes:

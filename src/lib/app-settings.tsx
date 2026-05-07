@@ -2,7 +2,6 @@
 
 import * as React from 'react';
 
-export const defaultApiBaseUrl = 'https://api.774966.xyz/v1';
 export const defaultModelIds = ['gpt-image-2'];
 const legacyDefaultModelIds = ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini'];
 
@@ -41,7 +40,16 @@ function normalizeModels(models: string[]): string[] {
         normalized.push(trimmedModel);
     }
 
-    return normalized.length > 0 ? normalized : defaultModelIds;
+    const withoutIncompletePrefixes = normalized.filter((model) => {
+        if (legacyDefaultModelIds.includes(model)) return true;
+
+        const looksIncomplete = model.endsWith('-') || !/\d/.test(model);
+        if (!looksIncomplete) return true;
+
+        return !normalized.some((otherModel) => otherModel !== model && otherModel.startsWith(model));
+    });
+
+    return withoutIncompletePrefixes.length > 0 ? withoutIncompletePrefixes : defaultModelIds;
 }
 
 function isLegacyDefaultModels(models: string[]): boolean {
@@ -79,7 +87,9 @@ export function AppSettingsProvider({ children }: { children: React.ReactNode })
     const [settings, setSettings] = React.useState<AppSettings>(defaultSettings);
 
     React.useEffect(() => {
-        setSettings(loadSettings());
+        const loadedSettings = loadSettings();
+        setSettings(loadedSettings);
+        window.localStorage.setItem(storageKey, JSON.stringify(loadedSettings));
     }, []);
 
     React.useEffect(() => {

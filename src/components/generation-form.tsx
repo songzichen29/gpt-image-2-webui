@@ -3,6 +3,7 @@
 import { ModeToggle } from '@/components/mode-toggle';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
@@ -45,6 +46,8 @@ export type GenerationFormData = {
     background: 'transparent' | 'opaque' | 'auto';
     moderation: 'low' | 'auto';
     model: GptImageModel;
+    stream: boolean;
+    partialImages: 1 | 2 | 3;
 };
 
 type GenerationFormProps = {
@@ -76,6 +79,8 @@ type GenerationFormProps = {
     setBackground: React.Dispatch<React.SetStateAction<GenerationFormData['background']>>;
     moderation: GenerationFormData['moderation'];
     setModeration: React.Dispatch<React.SetStateAction<GenerationFormData['moderation']>>;
+    streamEnabled: boolean;
+    setStreamEnabled: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
 const RadioItemWithIcon = ({
@@ -130,21 +135,17 @@ export function GenerationForm({
     background,
     setBackground,
     moderation,
-    setModeration
+    setModeration,
+    streamEnabled,
+    setStreamEnabled
 }: GenerationFormProps) {
     const { t } = useI18n();
     const showCompression = outputFormat === 'jpeg' || outputFormat === 'webp';
     const isGptImage2 = model === 'gpt-image-2';
+    const supportsCustomSize = true;
     const customSizeValidation =
         size === 'custom' ? validateGptImage2Size(customWidth, customHeight) : { valid: true as const };
     const customSizeInvalid = size === 'custom' && !customSizeValidation.valid;
-
-    // 'custom' is only valid on gpt-image-2; reset when switching to a legacy model
-    React.useEffect(() => {
-        if (!isGptImage2 && size === 'custom') {
-            setSize('square');
-        }
-    }, [isGptImage2, size, setSize]);
 
     // Reset transparent background when switching to gpt-image-2 (not supported)
     React.useEffect(() => {
@@ -152,6 +153,12 @@ export function GenerationForm({
             setBackground('auto');
         }
     }, [isGptImage2, background, setBackground]);
+
+    React.useEffect(() => {
+        if (n[0] !== 1 && streamEnabled) {
+            setStreamEnabled(false);
+        }
+    }, [n, streamEnabled, setStreamEnabled]);
 
     const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -168,7 +175,9 @@ export function GenerationForm({
             output_format: outputFormat,
             background,
             moderation,
-            model
+            model,
+            stream: streamEnabled && n[0] === 1,
+            partialImages: 2
         };
         if (showCompression) {
             formData.output_compression = compression[0];
@@ -239,6 +248,24 @@ export function GenerationForm({
                         />
                     </div>
 
+                    <div className='flex items-start gap-3 rounded-md border border-white/10 bg-white/5 p-3'>
+                        <Checkbox
+                            id='stream-enabled'
+                            checked={streamEnabled}
+                            onCheckedChange={(checked) => setStreamEnabled(checked === true)}
+                            disabled={isLoading || n[0] !== 1}
+                            className='mt-0.5 border-white/40 data-[state=checked]:border-white data-[state=checked]:bg-white data-[state=checked]:text-black'
+                        />
+                        <div className='space-y-1'>
+                            <Label htmlFor='stream-enabled' className='cursor-pointer text-sm text-white'>
+                                {t('form.enableStreaming')}
+                            </Label>
+                            <p className='text-xs text-white/50'>
+                                {n[0] === 1 ? t('form.streamingTooltip') : t('form.streamingSingleTooltip')}
+                            </p>
+                        </div>
+                    </div>
+
                     <div className='space-y-3'>
                         <Label className='block text-white'>{t('common.size')}</Label>
                         <RadioGroup
@@ -285,7 +312,7 @@ export function GenerationForm({
                                 </TooltipTrigger>
                                 <TooltipContent>{getPresetTooltip('portrait', model)}</TooltipContent>
                             </Tooltip>
-                            {isGptImage2 && (
+                            {supportsCustomSize && (
                                 <RadioItemWithIcon
                                     value='custom'
                                     id='size-custom'
@@ -294,7 +321,7 @@ export function GenerationForm({
                                 />
                             )}
                         </RadioGroup>
-                        {isGptImage2 && size === 'custom' && (
+                        {supportsCustomSize && size === 'custom' && (
                             <div className='space-y-2 rounded-md border border-white/10 bg-white/5 p-3'>
                                 <div className='flex items-center gap-3'>
                                     <div className='flex-1 space-y-1'>
