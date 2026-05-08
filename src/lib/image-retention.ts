@@ -1,5 +1,5 @@
-export const SERVER_IMAGE_RETENTION_DAYS = 3;
-export const SERVER_IMAGE_RETENTION_MS = SERVER_IMAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+export const SERVER_IMAGE_CLEANUP_TIMEZONE_OFFSET_MINUTES = 8 * 60;
+export const SERVER_IMAGE_DAILY_CLEANUP_HOUR = 3;
 
 type RetentionLocale = 'en' | 'zh';
 
@@ -15,7 +15,7 @@ export function getServerImageExpiryStatus(
     now: number,
     locale: RetentionLocale
 ): ServerImageExpiryStatus {
-    const expiresAt = new Date(timestamp + SERVER_IMAGE_RETENTION_MS);
+    const expiresAt = getNextDailyCleanupTime(timestamp);
     const remainingMs = expiresAt.getTime() - now;
 
     return {
@@ -24,6 +24,21 @@ export function getServerImageExpiryStatus(
         remainingMs,
         remainingText: formatRemainingTime(remainingMs, locale)
     };
+}
+
+export function getNextDailyCleanupTime(timestamp: number): Date {
+    const cleanupOffsetMs = SERVER_IMAGE_CLEANUP_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
+    const localTimestamp = timestamp + cleanupOffsetMs;
+    const localDate = new Date(localTimestamp);
+
+    const cleanupLocalTime = new Date(localTimestamp);
+    cleanupLocalTime.setUTCHours(SERVER_IMAGE_DAILY_CLEANUP_HOUR, 0, 0, 0);
+
+    if (localDate.getUTCHours() >= SERVER_IMAGE_DAILY_CLEANUP_HOUR) {
+        cleanupLocalTime.setUTCDate(cleanupLocalTime.getUTCDate() + 1);
+    }
+
+    return new Date(cleanupLocalTime.getTime() - cleanupOffsetMs);
 }
 
 function formatRemainingTime(remainingMs: number, locale: RetentionLocale): string {

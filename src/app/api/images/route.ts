@@ -27,6 +27,7 @@ type StreamingEvent = {
 };
 
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
+const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
 
 function getImageRequestTimeoutMs() {
     const configuredTimeout = Number.parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS || '', 10);
@@ -253,6 +254,18 @@ function sha256(data: string): string {
     return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+function enqueueSseData(controller: ReadableStreamDefaultController<Uint8Array>, encoder: TextEncoder, data: StreamingEvent) {
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+}
+
+function enqueueSseComment(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    encoder: TextEncoder,
+    comment: string
+) {
+    controller.enqueue(encoder.encode(`: ${comment}\n\n`));
+}
+
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/images');
 
@@ -339,7 +352,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Check for streaming mode
-        const streamEnabled = formData.get('stream') === 'true';
+        const streamRequested = formData.get('stream') === 'true';
         const partialImagesCount = parseInt((formData.get('partial_images') as string) || '2', 10);
 
         let result: OpenAI.Images.ImagesResponse;
@@ -380,8 +393,13 @@ export async function POST(request: NextRequest) {
             }
 
             // Handle streaming mode for generation
-            if (streamEnabled) {
-                const actualPartialImages = Math.max(1, Math.min(partialImagesCount, 3)) as 1 | 2 | 3;
+            const shouldUseStreamingResponse = streamRequested || requestedImageCount === 1;
+
+            if (shouldUseStreamingResponse) {
+                const actualPartialImages = Math.max(1, Math.min(streamRequested ? partialImagesCount : 1, 3)) as
+                    | 1
+                    | 2
+                    | 3;
 
                 const streamParams = {
                     ...baseParams,
@@ -400,6 +418,15 @@ export async function POST(request: NextRequest) {
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
+                        enqueueSseComment(controller, encoder, 'connected');
+                        const heartbeat = setInterval(() => {
+                            try {
+                                enqueueSseComment(controller, encoder, 'keep-alive');
+                            } catch {
+                                clearInterval(heartbeat);
+                            }
+                        }, SSE_HEARTBEAT_INTERVAL_MS);
+
                         try {
                             const completedImages: Array<{
                                 filename: string;
@@ -427,7 +454,7 @@ export async function POST(request: NextRequest) {
                                         partial_image_index: partialImageIndex,
                                         b64_json: b64Json
                                     };
-                                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`));
+                                    enqueueSseData(controller, encoder, partialEvent);
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
@@ -463,7 +490,7 @@ export async function POST(request: NextRequest) {
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
-                                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(completedEvent)}\n\n`));
+                                    enqueueSseData(controller, encoder, completedEvent);
 
                                     imageIndex++;
 
@@ -504,7 +531,7 @@ export async function POST(request: NextRequest) {
                                     path: savedPath,
                                     output_format: fileExtension
                                 };
-                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
+                                enqueueSseData(controller, encoder, fallbackEvent);
                             }
 
                             // Send final done event with all images and usage
@@ -514,7 +541,8 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
+                            clearInterval(heartbeat);
+                            enqueueSseData(controller, encoder, doneEvent);
                             controller.close();
                         } catch (error) {
                             console.error('Streaming error:', error);
@@ -522,7 +550,8 @@ export async function POST(request: NextRequest) {
                                 type: 'error',
                                 error: error instanceof Error ? error.message : 'Streaming error occurred'
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+                            clearInterval(heartbeat);
+                            enqueueSseData(controller, encoder, errorEvent);
                             controller.close();
                         }
                     }
@@ -532,7 +561,8 @@ export async function POST(request: NextRequest) {
                     headers: {
                         'Content-Type': 'text/event-stream',
                         'Cache-Control': 'no-cache',
-                        Connection: 'keep-alive'
+                        Connection: 'keep-alive',
+                        'X-Accel-Buffering': 'no'
                     }
                 });
             }
@@ -571,7 +601,7 @@ export async function POST(request: NextRequest) {
             };
 
             // Handle streaming mode for editing
-            if (streamEnabled) {
+            if (streamRequested) {
                 console.log('Calling OpenAI edit with streaming, params:', {
                     ...baseEditParams,
                     stream: true,
@@ -597,6 +627,15 @@ export async function POST(request: NextRequest) {
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
+                        enqueueSseComment(controller, encoder, 'connected');
+                        const heartbeat = setInterval(() => {
+                            try {
+                                enqueueSseComment(controller, encoder, 'keep-alive');
+                            } catch {
+                                clearInterval(heartbeat);
+                            }
+                        }, SSE_HEARTBEAT_INTERVAL_MS);
+
                         try {
                             const completedImages: Array<{
                                 filename: string;
@@ -624,7 +663,7 @@ export async function POST(request: NextRequest) {
                                         partial_image_index: partialImageIndex,
                                         b64_json: b64Json
                                     };
-                                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialEvent)}\n\n`));
+                                    enqueueSseData(controller, encoder, partialEvent);
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
@@ -660,7 +699,7 @@ export async function POST(request: NextRequest) {
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
-                                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(completedEvent)}\n\n`));
+                                    enqueueSseData(controller, encoder, completedEvent);
 
                                     imageIndex++;
 
@@ -701,7 +740,7 @@ export async function POST(request: NextRequest) {
                                     path: savedPath,
                                     output_format: fileExtension
                                 };
-                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
+                                enqueueSseData(controller, encoder, fallbackEvent);
                             }
 
                             // Send final done event with all images and usage
@@ -711,7 +750,8 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
+                            clearInterval(heartbeat);
+                            enqueueSseData(controller, encoder, doneEvent);
                             controller.close();
                         } catch (error) {
                             console.error('Streaming edit error:', error);
@@ -719,7 +759,8 @@ export async function POST(request: NextRequest) {
                                 type: 'error',
                                 error: error instanceof Error ? error.message : 'Streaming error occurred'
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+                            clearInterval(heartbeat);
+                            enqueueSseData(controller, encoder, errorEvent);
                             controller.close();
                         }
                     }
@@ -729,7 +770,8 @@ export async function POST(request: NextRequest) {
                     headers: {
                         'Content-Type': 'text/event-stream',
                         'Cache-Control': 'no-cache',
-                        Connection: 'keep-alive'
+                        Connection: 'keep-alive',
+                        'X-Accel-Buffering': 'no'
                     }
                 });
             }
