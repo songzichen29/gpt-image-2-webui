@@ -65,7 +65,8 @@ const en = {
     'help.title': 'Help notes',
     'help.baseUrl': 'Base URL is configured by OPENAI_API_BASE_URL on the server and is read-only here.',
     'help.apiKey': 'API Key is stored only in this browser localStorage unless you use the server environment key.',
-    'help.retention': 'Server-side files may be cleaned after 3 days. Important images should be downloaded in time.',
+    'help.retention':
+        'Server-side files are cleared daily at 3:00 AM (UTC+8). Important images should be downloaded in time.',
     'workspace.generateTitle': 'Describe and generate images',
     'workspace.generateDescription': 'The more specific your prompt is, the closer the generated result will match your idea.',
     'workspace.generateMode': 'Image Generate',
@@ -236,9 +237,10 @@ const en = {
     'history.serverExpiryCountdown': 'Online image cleanup in {time}. Expires at {date}.',
     'history.serverExpiryCountdownShort': 'Online clears in {time}',
     'history.serverExpiryExpired': 'Online copy may be gone',
-    'history.serverExpiryExpiredDetail': 'This item is past the 3-day server retention window. It expired at {date}.',
+    'history.serverExpiryExpiredDetail':
+        'This item has passed the daily 3:00 AM (UTC+8) cleanup time. It expired at {date}.',
     'history.serverExpiryNotice':
-        'Server-hosted images are retained for 3 days only. Local browser cache may still show them, but if browser data is cleared after the server copy expires, the image cannot be recovered.',
+        'Server-hosted images are cleared daily at 3:00 AM (UTC+8). Local browser cache may still show them, but if browser data is cleared after the server copy is removed, the image cannot be recovered.',
     'history.serverExpiryNoticeTitle': 'Server image retention',
     'history.imageInput': 'Image Input',
     'history.imageInputTokens': 'Image Input Tokens:',
@@ -415,7 +417,7 @@ const zh: Translations = {
     'help.title': '使用说明',
     'help.baseUrl': 'Base URL 由服务端环境变量 OPENAI_API_BASE_URL 配置，前端页面仅只读展示。',
     'help.apiKey': 'API Key 仅保存在当前浏览器 localStorage 中；如果服务端已配置环境变量，也可以留空使用。',
-    'help.retention': '服务端图片可能在 3 天后自动清理，重要结果请及时下载保存。',
+    'help.retention': '服务端图片会在每天凌晨 3 点（UTC+8）统一清理，重要结果请及时下载保存。',
     'workspace.generateTitle': '输入描述并生成图像',
     'workspace.generateDescription': '描述越详细，生成效果越贴近你的想法。',
     'workspace.generateMode': '图像生成',
@@ -581,9 +583,9 @@ const zh: Translations = {
     'history.serverExpiryCountdown': '线上图片约 {time} 后清理，过期时间：{date}。',
     'history.serverExpiryCountdownShort': '线上 {time} 后清理',
     'history.serverExpiryExpired': '线上图可能已清理',
-    'history.serverExpiryExpiredDetail': '这条记录已超过 3 天线上保留期，过期时间：{date}。',
+    'history.serverExpiryExpiredDetail': '这条记录已超过每天凌晨 3 点（UTC+8）的清理时间，过期时间：{date}。',
     'history.serverExpiryNotice':
-        '线上服务器图片只保留 3 天。本地浏览器缓存可能仍可显示，但如果清除了浏览器数据，且线上图片已经过期清理，就无法再恢复图片。',
+        '线上服务器图片会在每天凌晨 3 点（UTC+8）统一清理。本地浏览器缓存可能仍可显示，但如果清除了浏览器数据，且线上图片已经被清理，就无法再恢复图片。',
     'history.serverExpiryNoticeTitle': '线上图片保留提醒',
     'history.imageInput': '图片输入',
     'history.imageInputTokens': '图片输入 Tokens：',
