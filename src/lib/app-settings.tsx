@@ -6,7 +6,6 @@ export const defaultModelIds = ['gpt-image-2'];
 const legacyDefaultModelIds = ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini'];
 
 export type AppSettings = {
-    baseUrl: string;
     apiKey: string;
     models: string[];
 };
@@ -21,7 +20,6 @@ type AppSettingsContextValue = {
 const storageKey = 'gptImageAppSettings';
 
 const defaultSettings: AppSettings = {
-    baseUrl: '',
     apiKey: '',
     models: defaultModelIds
 };
@@ -63,7 +61,6 @@ function normalizeSettings(settings: Partial<AppSettings> | null | undefined): A
     const rawModels = settings?.models ?? defaultModelIds;
 
     return {
-        baseUrl: settings?.baseUrl?.trim() ?? '',
         apiKey: settings?.apiKey?.trim() ?? '',
         models: isLegacyDefaultModels(rawModels) ? defaultModelIds : normalizeModels(rawModels)
     };

@@ -1,9 +1,8 @@
-import crypto from 'crypto';
+﻿import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-
-const outputDir = path.resolve(process.cwd(), 'generated-images');
+import { getImageFilePath, isValidImageFilename } from '@/lib/server/image-storage';
+import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 function sha256(data: string): string {
     return crypto.createHash('sha256').update(data).digest('hex');
@@ -23,13 +22,17 @@ type FileDeletionResult = {
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/image-delete');
 
+    const image2Session = getImage2Session(request);
+    const image2UserId = image2Session?.user.id;
+    if (isSub2ApiSsoEnabled() && !image2UserId) {
+        return unauthorizedImage2Response(request);
+    }
+
     let requestBody: DeleteRequestBody;
     try {
-        // Clone the request to read the body for auth, then allow the original request to be read again
-        const clonedRequest = request.clone();
-        const tempBodyForAuth = await clonedRequest.json();
+        const tempBodyForAuth = await request.clone().json();
 
-        if (process.env.APP_PASSWORD) {
+        if (!isSub2ApiSsoEnabled() && process.env.APP_PASSWORD) {
             const clientPasswordHash = tempBodyForAuth.passwordHash as string | null;
 
             if (!clientPasswordHash) {
@@ -42,7 +45,6 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ error: 'Unauthorized: Invalid password.' }, { status: 401 });
             }
         }
-        // Now read the original request body for processing
         requestBody = await request.json();
     } catch (e) {
         console.error('Error parsing request body for /api/image-delete:', e);
@@ -62,13 +64,13 @@ export async function POST(request: NextRequest) {
     const deletionResults: FileDeletionResult[] = [];
 
     for (const filename of filenames) {
-        if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+        if (!isValidImageFilename(filename)) {
             console.warn(`Invalid filename for deletion: ${filename}`);
             deletionResults.push({ filename, success: false, error: 'Invalid filename format.' });
             continue;
         }
 
-        const filepath = path.join(outputDir, filename);
+        const filepath = getImageFilePath(filename, image2UserId);
 
         try {
             await fs.unlink(filepath);
@@ -91,6 +93,6 @@ export async function POST(request: NextRequest) {
             message: allSucceeded ? 'All files deleted successfully.' : 'Some files could not be deleted.',
             results: deletionResults
         },
-        { status: allSucceeded ? 200 : 207 } // 207 Multi-Status if some failed
+        { status: allSucceeded ? 200 : 207 }
     );
 }

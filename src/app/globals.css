@@ -116,6 +116,11 @@
     * {
         @apply border-border outline-ring/50;
     }
+    html,
+    body {
+        height: 100%;
+        overflow: hidden;
+    }
     body {
         @apply bg-background text-foreground;
     }
@@ -129,10 +134,6 @@
     .light .bg-black\/90,
     .light .bg-black\/95 {
         background-color: rgb(248 250 252 / 0.92);
-    }
-
-    .light .bg-white {
-        background-color: #111827;
     }
 
     .light .bg-white\/5 {
@@ -174,49 +175,49 @@
     }
 
     .light .hover\:bg-white\/90:hover {
-        background-color: rgb(17 24 39 / 0.9);
+        background-color: rgb(15 23 42 / 0.9);
     }
 
     .light .text-white {
-        color: #111827;
+        color: #0f172a;
     }
 
     .light .text-white\/85 {
-        color: rgb(17 24 39 / 0.85);
+        color: rgb(15 23 42 / 0.85);
     }
 
     .light .text-white\/90 {
-        color: rgb(17 24 39 / 0.9);
+        color: rgb(15 23 42 / 0.9);
     }
 
     .light .text-white\/80 {
-        color: rgb(17 24 39 / 0.8);
+        color: rgb(15 23 42 / 0.8);
     }
 
     .light .text-white\/75 {
-        color: rgb(17 24 39 / 0.75);
+        color: rgb(15 23 42 / 0.75);
     }
 
     .light .text-white\/70 {
-        color: rgb(17 24 39 / 0.7);
+        color: rgb(15 23 42 / 0.7);
     }
 
     .light .text-white\/60 {
-        color: rgb(17 24 39 / 0.6);
+        color: rgb(15 23 42 / 0.6);
     }
 
     .light .text-white\/50 {
-        color: rgb(17 24 39 / 0.5);
+        color: rgb(15 23 42 / 0.5);
     }
 
     .light .text-white\/55 {
-        color: rgb(17 24 39 / 0.55);
+        color: rgb(15 23 42 / 0.55);
     }
 
     .light .text-white\/40,
     .light .text-white\/45,
     .light .text-white\/35 {
-        color: rgb(17 24 39 / 0.42);
+        color: rgb(15 23 42 / 0.42);
     }
 
     .light .text-black {
@@ -271,6 +272,6 @@
 
     .light .placeholder\:text-white\/35::placeholder,
     .light .placeholder\:text-white\/40::placeholder {
-        color: rgb(17 24 39 / 0.4);
+        color: rgb(15 23 42 / 0.4);
     }
 }

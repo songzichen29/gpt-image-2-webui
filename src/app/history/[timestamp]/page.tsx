@@ -3,15 +3,17 @@
 import type { HistoryMetadata } from '@/app/page';
 import { SiteValueComparison } from '@/components/site-value-comparison';
 import { Button } from '@/components/ui/button';
+import { useHomeAuth } from '@/hooks/use-home-auth';
+import { getHistoryStorageKey } from '@/hooks/use-home-history';
 import { formatUsdCny, getModelRates, USD_TO_CNY_RATE, type GptImageModel } from '@/lib/cost-utils';
-import { db, type ImageRecord } from '@/lib/db';
+import { db, LEGACY_IMAGE_USER_ID, type ImageRecord } from '@/lib/db';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
 import { getServerImageExpiryStatus } from '@/lib/image-retention';
 import { cn } from '@/lib/utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { ArrowLeft, Check, Clock, Copy, Database, Download, FileImage, HardDrive } from 'lucide-react';
 import Image from 'next/image';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import * as React from 'react';
 
 const formatDuration = (ms: number): string => {
@@ -26,7 +28,11 @@ const tokenCost = (tokens: number, rate: number): number => tokens * rate;
 export default function HistoryDetailPage() {
     const router = useRouter();
     const params = useParams<{ timestamp: string }>();
+    const searchParams = useSearchParams();
     const { language, t } = useI18n();
+    const { authMode, image2User, isAuthReady } = useHomeAuth();
+    const scopedHistoryUserId = authMode === 'sub2api' ? (image2User?.id ?? null) : undefined;
+    const activeImageUserId = authMode === 'sub2api' ? image2User?.id : LEGACY_IMAGE_USER_ID;
     const [item, setItem] = React.useState<HistoryMetadata | null | undefined>(undefined);
     const [selectedImageIndex, setSelectedImageIndex] = React.useState(0);
     const [copiedPrompt, setCopiedPrompt] = React.useState(false);
@@ -35,7 +41,13 @@ export default function HistoryDetailPage() {
     const [now, setNow] = React.useState(() => Date.now());
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
 
-    const allDbImages = useLiveQuery<ImageRecord[] | undefined>(() => db.images.toArray(), []);
+    const allDbImages = useLiveQuery<ImageRecord[] | undefined>(
+        () =>
+            activeImageUserId === undefined
+                ? Promise.resolve([])
+                : db.images.where('userId').equals(activeImageUserId).toArray(),
+        [activeImageUserId]
+    );
 
     React.useEffect(() => {
         const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -50,7 +62,8 @@ export default function HistoryDetailPage() {
         }
 
         try {
-            const storedHistory = localStorage.getItem('openaiImageHistory');
+            const storageKey = getHistoryStorageKey(scopedHistoryUserId);
+            const storedHistory = storageKey ? localStorage.getItem(storageKey) : null;
             const parsedHistory: HistoryMetadata[] = storedHistory ? JSON.parse(storedHistory) : [];
             const match = Array.isArray(parsedHistory)
                 ? parsedHistory.find((historyItem) => historyItem.timestamp === timestamp)
@@ -60,11 +73,12 @@ export default function HistoryDetailPage() {
             console.error('Failed to read history detail:', error);
             setItem(null);
         }
-    }, [params.timestamp]);
+    }, [params.timestamp, scopedHistoryUserId]);
 
     React.useEffect(() => {
-        setSelectedImageIndex(0);
-    }, [item?.timestamp]);
+        const imageIndex = Number(searchParams.get('image') ?? 0);
+        setSelectedImageIndex(Number.isFinite(imageIndex) && imageIndex >= 0 ? imageIndex : 0);
+    }, [item?.timestamp, searchParams]);
 
     React.useEffect(() => {
         const cache = blobUrlCacheRef.current;
@@ -104,7 +118,7 @@ export default function HistoryDetailPage() {
     }, [allDbImages, item]);
 
     const handleBack = () => {
-        router.push('/');
+        router.push('/history');
     };
 
     const handleCopyPrompt = async () => {
@@ -128,6 +142,14 @@ export default function HistoryDetailPage() {
             console.error('Failed to copy revised prompt:', error);
         }
     };
+
+    if (authMode === 'sub2api' && !isAuthReady) {
+        return (
+            <main className='flex h-screen items-center justify-center overflow-hidden bg-black p-4 text-white'>
+                <p className='text-white/60'>{t('history.loading')}</p>
+            </main>
+        );
+    }
 
     if (item === undefined) {
         return (

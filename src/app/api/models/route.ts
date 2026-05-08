@@ -1,10 +1,10 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 type ModelsRequestBody = {
     apiKey?: string;
-    baseUrl?: string;
     passwordHash?: string;
 };
 
@@ -36,7 +36,11 @@ export async function POST(request: NextRequest) {
         body = {};
     }
 
-    if (process.env.APP_PASSWORD) {
+    if (isSub2ApiSsoEnabled() && !getImage2Session(request)) {
+        return unauthorizedImage2Response(request);
+    }
+
+    if (!isSub2ApiSsoEnabled() && process.env.APP_PASSWORD) {
         if (!body.passwordHash) {
             return NextResponse.json({ error: 'Unauthorized: Missing password hash.' }, { status: 401 });
         }
@@ -48,7 +52,7 @@ export async function POST(request: NextRequest) {
     }
 
     const apiKey = body.apiKey?.trim() || process.env.OPENAI_API_KEY;
-    const baseURL = body.baseUrl?.trim() || process.env.OPENAI_API_BASE_URL?.trim();
+    const baseURL = process.env.OPENAI_API_BASE_URL?.trim();
 
     if (!apiKey) {
         return NextResponse.json({ error: 'API key not found. Add one or configure OPENAI_API_KEY.' }, { status: 400 });

@@ -2,7 +2,8 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import path from 'path';
+import { ensureImageOutputDirExists, getImageFilePath } from '@/lib/server/image-storage';
+import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 // Streaming event types
 type StreamingEvent = {
@@ -25,7 +26,6 @@ type StreamingEvent = {
     error?: string;
 };
 
-const outputDir = path.resolve(process.cwd(), 'generated-images');
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 
 function getImageRequestTimeoutMs() {
@@ -249,27 +249,6 @@ async function fillMissingImages(
     };
 }
 
-async function ensureOutputDirExists() {
-    try {
-        await fs.access(outputDir);
-    } catch (error: unknown) {
-        if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
-            try {
-                await fs.mkdir(outputDir, { recursive: true });
-                console.log(`Created output directory: ${outputDir}`);
-            } catch (mkdirError) {
-                console.error(`Error creating output directory ${outputDir}:`, mkdirError);
-                throw new Error('Failed to create image output directory.');
-            }
-        } else {
-            console.error(`Error accessing output directory ${outputDir}:`, error);
-            throw new Error(
-                `Failed to access or ensure image output directory exists. Original error: ${error instanceof Error ? error.message : String(error)}`
-            );
-        }
-    }
-}
-
 function sha256(data: string): string {
     return crypto.createHash('sha256').update(data).digest('hex');
 }
@@ -295,13 +274,20 @@ export async function POST(request: NextRequest) {
             `Effective Image Storage Mode: ${effectiveStorageMode} (Explicit: ${explicitMode || 'unset'}, Vercel: ${isOnVercel})`
         );
 
+        const image2Session = getImage2Session(request);
+        const image2UserId = image2Session?.user.id;
+
+        if (isSub2ApiSsoEnabled() && !image2UserId) {
+            return unauthorizedImage2Response(request);
+        }
+
         if (effectiveStorageMode === 'fs') {
-            await ensureOutputDirExists();
+            await ensureImageOutputDirExists(image2UserId);
         }
 
         const formData = await request.formData();
 
-        if (process.env.APP_PASSWORD) {
+        if (!isSub2ApiSsoEnabled() && process.env.APP_PASSWORD) {
             const clientPasswordHash = formData.get('passwordHash') as string | null;
             if (!clientPasswordHash) {
                 console.error('Missing password hash.');
@@ -315,11 +301,10 @@ export async function POST(request: NextRequest) {
         }
 
         const localApiKey = (formData.get('apiKey') as string | null)?.trim();
-        const localBaseUrl = (formData.get('baseUrl') as string | null)?.trim();
         const responseLanguage = formData.get('responseLanguage');
         const acceptLanguage = getPreferredAcceptLanguage(responseLanguage, request);
         const apiKey = localApiKey || process.env.OPENAI_API_KEY;
-        const baseURL = localBaseUrl || process.env.OPENAI_API_BASE_URL?.trim();
+        const baseURL = process.env.OPENAI_API_BASE_URL?.trim();
 
         if (!apiKey) {
             console.error('No API key was provided by local settings or OPENAI_API_KEY.');
@@ -451,7 +436,7 @@ export async function POST(request: NextRequest) {
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
                                         const buffer = Buffer.from(b64Json, 'base64');
-                                        const filepath = path.join(outputDir, filename);
+                                        const filepath = getImageFilePath(filename, image2UserId);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming: Saved image ${filename}`);
                                     }
@@ -498,7 +483,7 @@ export async function POST(request: NextRequest) {
                                 const filename = `${timestamp}-0.${fileExtension}`;
                                 if (effectiveStorageMode === 'fs') {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    const filepath = path.join(outputDir, filename);
+                                    const filepath = getImageFilePath(filename, image2UserId);
                                     await fs.writeFile(filepath, buffer);
                                 }
 
@@ -648,7 +633,7 @@ export async function POST(request: NextRequest) {
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
                                         const buffer = Buffer.from(b64Json, 'base64');
-                                        const filepath = path.join(outputDir, filename);
+                                        const filepath = getImageFilePath(filename, image2UserId);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming edit: Saved image ${filename}`);
                                     }
@@ -695,7 +680,7 @@ export async function POST(request: NextRequest) {
                                 const filename = `${timestamp}-0.${fileExtension}`;
                                 if (effectiveStorageMode === 'fs') {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    const filepath = path.join(outputDir, filename);
+                                    const filepath = getImageFilePath(filename, image2UserId);
                                     await fs.writeFile(filepath, buffer);
                                 }
 
@@ -787,7 +772,7 @@ export async function POST(request: NextRequest) {
                 const filename = `${timestamp}-${index}.${fileExtension}`;
 
                 if (effectiveStorageMode === 'fs') {
-                    const filepath = path.join(outputDir, filename);
+                    const filepath = getImageFilePath(filename, image2UserId);
                     console.log(`Attempting to save image to: ${filepath}`);
                     await fs.writeFile(filepath, buffer);
                     console.log(`Successfully saved image: ${filename}`);

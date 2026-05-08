@@ -34,7 +34,7 @@ export default function RootLayout({
     return (
         <html lang='en' translate='no' className='notranslate' suppressHydrationWarning>
             <body translate='no' className={`${geistSans.variable} ${geistMono.variable} notranslate antialiased`}>
-                <ThemeProvider attribute='class' defaultTheme='dark' enableSystem disableTransitionOnChange>
+                <ThemeProvider attribute='class' defaultTheme='light' enableSystem disableTransitionOnChange>
                     <I18nProvider>
                         <AppSettingsProvider>{children}</AppSettingsProvider>
                     </I18nProvider>

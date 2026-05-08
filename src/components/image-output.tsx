@@ -107,7 +107,7 @@ export function ImageOutput({
     };
 
     return (
-        <div className='flex h-full min-h-[300px] w-full flex-col items-center justify-between gap-4 overflow-hidden rounded-lg border border-white/20 bg-black p-4'>
+        <div className='flex h-full min-h-0 w-full flex-col items-center justify-between gap-2 overflow-hidden border border-slate-200 bg-[#fbfbfc] p-3 lg:min-h-[300px] lg:gap-3 lg:p-4 dark:border-white/10 dark:bg-[#0f1115]'>
             <ImagePreviewDialog
                 image={previewImage}
                 open={!!previewImage}
@@ -127,14 +127,14 @@ export function ImageOutput({
                                 className='blur-md filter'
                                 unoptimized
                             />
-                            <div className='absolute inset-0 flex flex-col items-center justify-center bg-black/50 text-white/80'>
+                            <div className='absolute inset-0 flex flex-col items-center justify-center bg-white/65 text-slate-700 dark:bg-black/50 dark:text-white/80'>
                                 <Loader2 className='mb-2 h-8 w-8 animate-spin' />
                                 <p>{t('output.editing')}</p>
                                 <p className='mt-1 text-sm text-white/60'>{elapsedLabel}</p>
                             </div>
                         </div>
                     ) : (
-                        <div className='flex flex-col items-center justify-center text-white/60'>
+                        <div className='flex flex-col items-center justify-center text-slate-500 dark:text-white/60'>
                             <Loader2 className='mb-2 h-8 w-8 animate-spin' />
                             <p>{t('output.generating')}</p>
                             <p className='mt-1 text-sm text-white/50'>{elapsedLabel}</p>
@@ -221,21 +221,21 @@ export function ImageOutput({
                             )}
                         </>
                     ) : (
-                        <div className='text-center text-white/40'>
+                        <div className='text-center text-slate-400 dark:text-white/40'>
                             <p>{t('output.displayError')}</p>
                         </div>
                     )
                 ) : (
-                    <div className='text-center text-white/40'>
+                    <div className='text-center text-slate-400 dark:text-white/40'>
                         <p>{t('output.empty')}</p>
                     </div>
                 )}
             </div>
 
             {selectedImage && activePrompt && (
-                <div className='max-h-20 w-full shrink-0 overflow-y-auto rounded-md border border-white/10 bg-white/[0.035] p-2 text-xs text-white/70'>
+                <div className='max-h-20 w-full shrink-0 overflow-y-auto border border-slate-200 bg-white p-3 text-[12px] text-slate-600 dark:border-white/10 dark:bg-white/[0.035] dark:text-white/70'>
                     <div className='mb-1 flex items-center justify-between gap-2'>
-                        <p className='font-medium text-white/85'>{activePromptTitle}</p>
+                        <p className='font-medium text-slate-800 dark:text-white/85'>{activePromptTitle}</p>
                         {originalPrompt && revisedPrompt && (
                             <div className='flex rounded border border-white/10 p-0.5'>
                                 <button
@@ -267,7 +267,7 @@ export function ImageOutput({
                 </div>
             )}
 
-            <div className='flex h-10 w-full shrink-0 items-center justify-center gap-4'>
+            <div className='flex h-10 w-full shrink-0 items-center justify-center gap-3'>
                 {showCarousel && (
                     <div className='flex items-center gap-1.5 rounded-md border border-white/10 bg-neutral-800/50 p-1'>
                         <Button

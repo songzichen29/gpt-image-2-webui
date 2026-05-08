@@ -2,35 +2,29 @@
 
 import { EditingForm, type EditingFormData } from '@/components/editing-form';
 import { GenerationForm, type GenerationFormData } from '@/components/generation-form';
-import { HistoryPanel } from '@/components/history-panel';
+import { GenerationWorkspace } from '@/components/generation-workspace';
+import { ApiInfoPanel } from '@/components/home/api-info-panel';
+import { HelpNotes } from '@/components/home/help-notes';
+import { MobileBottomNav } from '@/components/home/mobile-bottom-nav';
+import { MobileParametersPanel } from '@/components/home/mobile-parameters-panel';
+import { PreferencesPanel } from '@/components/home/preferences-panel';
+import { AppTopbar } from '@/components/home/app-topbar';
 import { ImageOutput } from '@/components/image-output';
 import { PasswordDialog } from '@/components/password-dialog';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useHomeAuth } from '@/hooks/use-home-auth';
+import { useHomeHistory } from '@/hooks/use-home-history';
+import { useModelPreferences } from '@/hooks/use-model-preferences';
 import { useAppSettings } from '@/lib/app-settings';
 import { calculateApiCost, formatUsdCny, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
-import { db, type ImageRecord } from '@/lib/db';
-import { useI18n, type LanguagePreference } from '@/lib/i18n';
-import { getPresetDimensions } from '@/lib/size-utils';
+import { db, LEGACY_IMAGE_USER_ID, type ImageRecord } from '@/lib/db';
+import { formatOptionLabel, useI18n } from '@/lib/i18n';
+import { getPresetDimensions, validateGptImage2Size } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
-import {
-    CheckCircle2,
-    ChevronDown,
-    Cpu,
-    ExternalLink,
-    Eye,
-    EyeOff,
-    Globe2,
-    KeyRound,
-    Languages,
-    Loader2,
-    Moon,
-    Sun
-} from 'lucide-react';
+import { RotateCcw } from 'lucide-react';
 import { useTheme } from 'next-themes';
+import { useRouter } from 'next/navigation';
 import * as React from 'react';
 
 type HistoryImage = {
@@ -109,11 +103,7 @@ type ImageApiResult = {
     revised_prompt?: string;
     usage?: ApiUsageForCost;
     error?: string;
-};
-
-type ModelsApiResult = {
-    models?: string[];
-    error?: string;
+    loginUrl?: string;
 };
 
 type ApiResponseInfo = {
@@ -143,61 +133,6 @@ type ApiResponseInfo = {
     };
 };
 
-function getTokenConsoleUrl(baseUrl: string): string | null {
-    const trimmedBaseUrl = baseUrl.trim();
-    if (!trimmedBaseUrl) return null;
-
-    try {
-        const parsedBaseUrl = new URL(trimmedBaseUrl);
-        return new URL('/console/token', parsedBaseUrl.origin).toString();
-    } catch {
-        return null;
-    }
-}
-
-function normalizeModelOptions(model: string, existingModels: string[]): string[] {
-    const seen = new Set<string>();
-    const nextModels: string[] = [];
-
-    for (const rawModel of [model, ...existingModels]) {
-        const trimmedModel = rawModel.trim();
-        if (!trimmedModel || seen.has(trimmedModel)) continue;
-
-        seen.add(trimmedModel);
-        nextModels.push(trimmedModel);
-    }
-
-    const withoutIncompletePrefixes = removeIncompletePrefixModels(nextModels);
-
-    return withoutIncompletePrefixes.length > 0 ? withoutIncompletePrefixes : ['gpt-image-2'];
-}
-
-function removeIncompletePrefixModels(models: string[]): string[] {
-    return models.filter((model) => {
-        const looksIncomplete = model.endsWith('-') || !/\d/.test(model);
-        if (!looksIncomplete) return true;
-
-        return !models.some((otherModel) => otherModel !== model && otherModel.startsWith(model));
-    });
-}
-
-function mergeModelOptions(groups: string[][]): string[] {
-    const seen = new Set<string>();
-    const options: string[] = [];
-
-    for (const group of groups) {
-        for (const rawModel of removeIncompletePrefixModels(group)) {
-            const model = rawModel.trim();
-            if (!model || seen.has(model)) continue;
-
-            seen.add(model);
-            options.push(model);
-        }
-    }
-
-    return options.length > 0 ? options : ['gpt-image-2'];
-}
-
 function formatApiDuration(durationMs?: number): string {
     if (durationMs === undefined) return '-';
     if (durationMs < 1000) return `${durationMs}ms`;
@@ -210,20 +145,25 @@ function formatContentType(contentType?: string | null): string {
 }
 
 export default function HomePage() {
+    const router = useRouter();
     const { language, languagePreference, setLanguagePreference, t } = useI18n();
     const { settings, modelOptions, saveSettings } = useAppSettings();
     const { resolvedTheme, setTheme } = useTheme();
+    const {
+        authMode,
+        clientPasswordHash,
+        configuredBaseUrl,
+        image2User,
+        isAuthReady,
+        isPasswordRequiredByBackend,
+        keysUrl,
+        setClientPasswordHash
+    } = useHomeAuth();
+    const scopedHistoryUserId = authMode === 'sub2api' ? (image2User?.id ?? null) : undefined;
+    const activeImageUserId = authMode === 'sub2api' ? image2User?.id : LEGACY_IMAGE_USER_ID;
+    const { setHistory } = useHomeHistory<HistoryMetadata>(scopedHistoryUserId);
     const [isThemeMounted, setIsThemeMounted] = React.useState(false);
     const [mode, setMode] = React.useState<'generate' | 'edit'>('generate');
-    const [isPasswordRequiredByBackend, setIsPasswordRequiredByBackend] = React.useState<boolean | null>(null);
-    const [clientPasswordHash, setClientPasswordHash] = React.useState<string | null>(null);
-    const [baseUrlDraft, setBaseUrlDraft] = React.useState(settings.baseUrl);
-    const [apiKeyDraft, setApiKeyDraft] = React.useState(settings.apiKey);
-    const [modelDraft, setModelDraft] = React.useState(settings.models[0] ?? 'gpt-image-2');
-    const [remoteModelOptions, setRemoteModelOptions] = React.useState<string[]>([]);
-    const [isModelMenuOpen, setIsModelMenuOpen] = React.useState(false);
-    const [isFetchingModels, setIsFetchingModels] = React.useState(false);
-    const [modelFetchError, setModelFetchError] = React.useState<string | null>(null);
     const [showApiKey, setShowApiKey] = React.useState(false);
     const [isLoading, setIsLoading] = React.useState(false);
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
@@ -235,20 +175,22 @@ export default function HomePage() {
     const [latestImageBatch, setLatestImageBatch] = React.useState<ImageBatchItem[] | null>(null);
     const [latestBatchPrompt, setLatestBatchPrompt] = React.useState('');
     const [imageOutputView, setImageOutputView] = React.useState<'grid' | number>('grid');
-    const [history, setHistory] = React.useState<HistoryMetadata[]>([]);
-    const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
-    const [isInitialLoad, setIsInitialLoad] = React.useState(true);
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
     const modelMenuRef = React.useRef<HTMLDivElement>(null);
     const [isPasswordDialogOpen, setIsPasswordDialogOpen] = React.useState(false);
     const [passwordDialogContext, setPasswordDialogContext] = React.useState<'initial' | 'retry'>('initial');
     const [lastApiCallArgs, setLastApiCallArgs] = React.useState<[GenerationFormData | EditingFormData] | null>(null);
-    const [skipDeleteConfirmation, setSkipDeleteConfirmation] = React.useState<boolean>(false);
-    const [itemToDeleteConfirm, setItemToDeleteConfirm] = React.useState<HistoryMetadata | null>(null);
-    const [dialogCheckboxStateSkipConfirm, setDialogCheckboxStateSkipConfirm] = React.useState<boolean>(false);
+    const [showPreferences, setShowPreferences] = React.useState(false);
+    const [showHelpDialog, setShowHelpDialog] = React.useState(false);
+    const [showMobileSettings, setShowMobileSettings] = React.useState(false);
 
-    const allDbImages = useLiveQuery<ImageRecord[] | undefined>(() => db.images.toArray(), []);
-    const isImageCacheReady = allDbImages !== undefined;
+    const allDbImages = useLiveQuery<ImageRecord[] | undefined>(
+        () =>
+            activeImageUserId === undefined
+                ? Promise.resolve([])
+                : db.images.where('userId').equals(activeImageUserId).toArray(),
+        [activeImageUserId]
+    );
 
     const [editImageFiles, setEditImageFiles] = React.useState<File[]>([]);
     const [editSourceImagePreviewUrls, setEditSourceImagePreviewUrls] = React.useState<string[]>([]);
@@ -267,20 +209,27 @@ export default function HomePage() {
     );
     const [editDrawnPoints, setEditDrawnPoints] = React.useState<DrawnPoint[]>([]);
     const [editMaskPreviewUrl, setEditMaskPreviewUrl] = React.useState<string | null>(null);
-
-    const selectedModel = (modelDraft.trim() || settings.models[0] || 'gpt-image-2') as GptImageModel;
-    const combinedModelOptions = React.useMemo(
-        () => mergeModelOptions([remoteModelOptions, modelOptions]),
-        [modelOptions, remoteModelOptions]
-    );
-    const filteredModelOptions = React.useMemo(() => {
-        const query = modelDraft.trim().toLowerCase();
-        const filteredOptions = query
-            ? combinedModelOptions.filter((model) => model.toLowerCase().includes(query))
-            : combinedModelOptions;
-
-        return filteredOptions.slice(0, 50);
-    }, [combinedModelOptions, modelDraft]);
+    const {
+        apiKeyDraft,
+        fetchModelOptions,
+        filteredModelOptions,
+        handleApiKeyChange,
+        handleModelChange,
+        handleModelSelect,
+        isFetchingModels,
+        isModelMenuOpen,
+        modelDraft,
+        modelFetchError,
+        saveModelChoice,
+        selectedModel,
+        setIsModelMenuOpen
+    } = useModelPreferences({
+        clientPasswordHash,
+        initialModelOptions: modelOptions,
+        isPasswordRequiredByBackend,
+        saveSettings,
+        settings
+    });
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
     const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('square');
@@ -292,6 +241,36 @@ export default function HomePage() {
     const [genBackground, setGenBackground] = React.useState<GenerationFormData['background']>('auto');
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
     const [genStreamEnabled, setGenStreamEnabled] = React.useState(false);
+    const genCustomSizeInvalid =
+        genSize === 'custom' && !validateGptImage2Size(genCustomWidth, genCustomHeight).valid;
+    const editCustomSizeInvalid =
+        editSize === 'custom' && !validateGptImage2Size(editCustomWidth, editCustomHeight).valid;
+    const mobileParameterSummary =
+        mode === 'edit'
+            ? `${formatOptionLabel(editSize, t)} / ${formatOptionLabel(editQuality, t)} / ${editN[0]}`
+            : `${formatOptionLabel(genSize, t)} / ${formatOptionLabel(genQuality, t)} / ${genN[0]}`;
+    const resetCurrentParameters = () => {
+        if (mode === 'edit') {
+            setEditN([1]);
+            setEditSize('square');
+            setEditCustomWidth(1024);
+            setEditCustomHeight(1024);
+            setEditQuality('auto');
+            setEditBrushSize([20]);
+            return;
+        }
+
+        setGenN([1]);
+        setGenSize('square');
+        setGenCustomWidth(1024);
+        setGenCustomHeight(1024);
+        setGenQuality('auto');
+        setGenOutputFormat('png');
+        setGenCompression([100]);
+        setGenBackground('auto');
+        setGenModeration('auto');
+        setGenStreamEnabled(false);
+    };
 
     const normalizeRevisedPrompt = React.useCallback((value: unknown): string | undefined => {
         return typeof value === 'string' && value.trim() ? value : undefined;
@@ -309,113 +288,18 @@ export default function HomePage() {
     }, []);
 
     React.useEffect(() => {
-        setBaseUrlDraft(settings.baseUrl);
-        setApiKeyDraft(settings.apiKey);
-        setModelDraft(settings.models[0] ?? 'gpt-image-2');
-    }, [settings.baseUrl, settings.apiKey, settings.models]);
+        const modeParam = new URLSearchParams(window.location.search).get('mode');
+        if (modeParam === 'edit' || modeParam === 'generate') {
+            setMode(modeParam);
+            window.history.replaceState(null, '', window.location.pathname);
+        }
+    }, []);
 
     const currentTheme = isThemeMounted ? (resolvedTheme ?? 'dark') : 'dark';
 
     const handleThemeToggle = () => {
         setTheme(currentTheme === 'dark' ? 'light' : 'dark');
     };
-
-    const handleBaseUrlChange = (value: string) => {
-        setBaseUrlDraft(value);
-        saveSettings({
-            ...settings,
-            baseUrl: value,
-            apiKey: apiKeyDraft,
-            models: settings.models
-        });
-    };
-
-    const handleApiKeyChange = (value: string) => {
-        setApiKeyDraft(value);
-        saveSettings({
-            ...settings,
-            baseUrl: baseUrlDraft,
-            apiKey: value,
-            models: settings.models
-        });
-    };
-
-    const handleModelChange = (value: string) => {
-        setModelDraft(value);
-    };
-
-    const saveModelChoice = React.useCallback(
-        (value: string) => {
-            if (!value.trim()) return;
-
-            saveSettings({
-                ...settings,
-                baseUrl: baseUrlDraft,
-                apiKey: apiKeyDraft,
-                models: normalizeModelOptions(value, settings.models)
-            });
-        },
-        [apiKeyDraft, baseUrlDraft, saveSettings, settings]
-    );
-
-    const handleModelSelect = (value: string) => {
-        setModelDraft(value);
-        saveSettings({
-            ...settings,
-            baseUrl: baseUrlDraft,
-            apiKey: apiKeyDraft,
-            models: normalizeModelOptions(value, settings.models)
-        });
-    };
-
-    const tokenConsoleUrl = React.useMemo(
-        () => getTokenConsoleUrl(baseUrlDraft || settings.baseUrl),
-        [baseUrlDraft, settings.baseUrl]
-    );
-
-    const fetchModelOptions = React.useCallback(async () => {
-        if (isPasswordRequiredByBackend && !clientPasswordHash) {
-            setModelFetchError(t('page.passwordMissing'));
-            return;
-        }
-
-        setIsFetchingModels(true);
-        setModelFetchError(null);
-
-        try {
-            const response = await fetch('/api/models', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    apiKey: apiKeyDraft.trim() || undefined,
-                    baseUrl: baseUrlDraft.trim() || undefined,
-                    ...(isPasswordRequiredByBackend && clientPasswordHash ? { passwordHash: clientPasswordHash } : {})
-                })
-            });
-            const result: ModelsApiResult = await response.json();
-
-            if (!response.ok) {
-                throw new Error(result.error || t('page.apiRequestFailed', { status: response.status }));
-            }
-
-            setRemoteModelOptions(Array.isArray(result.models) ? result.models : []);
-        } catch (error) {
-            setRemoteModelOptions([]);
-            setModelFetchError(error instanceof Error ? error.message : t('settings.modelsFetchFailed'));
-        } finally {
-            setIsFetchingModels(false);
-        }
-    }, [apiKeyDraft, baseUrlDraft, clientPasswordHash, isPasswordRequiredByBackend, t]);
-
-    React.useEffect(() => {
-        if (isPasswordRequiredByBackend === null) return;
-
-        const timeoutId = window.setTimeout(() => {
-            fetchModelOptions();
-        }, 600);
-
-        return () => window.clearTimeout(timeoutId);
-    }, [fetchModelOptions, isPasswordRequiredByBackend]);
 
     React.useEffect(() => {
         const handlePointerDown = (event: PointerEvent) => {
@@ -443,20 +327,13 @@ export default function HomePage() {
         return () => window.clearInterval(intervalId);
     }, [activeRequestStartedAt, isLoading]);
 
-    const getImageSrc = React.useCallback(
-        (filename: string): string | undefined => imageSrcByFilename[filename],
-        [imageSrcByFilename]
-    );
-
     React.useEffect(() => {
         if (allDbImages === undefined) {
-            setImageSrcByFilename({});
             return;
         }
 
         const previousCache = blobUrlCacheRef.current;
         const nextCache = new Map<string, string>();
-        const nextSrcByFilename: Record<string, string> = {};
 
         allDbImages.forEach((record) => {
             if (!record.blob) return;
@@ -464,13 +341,11 @@ export default function HomePage() {
             const cachedUrl = previousCache.get(record.filename);
             if (cachedUrl) {
                 nextCache.set(record.filename, cachedUrl);
-                nextSrcByFilename[record.filename] = cachedUrl;
                 return;
             }
 
             const url = URL.createObjectURL(record.blob);
             nextCache.set(record.filename, url);
-            nextSrcByFilename[record.filename] = url;
         });
 
         previousCache.forEach((url, filename) => {
@@ -480,7 +355,6 @@ export default function HomePage() {
         });
 
         blobUrlCacheRef.current = nextCache;
-        setImageSrcByFilename(nextSrcByFilename);
     }, [allDbImages]);
 
     React.useEffect(() => {
@@ -495,104 +369,6 @@ export default function HomePage() {
             editSourceImagePreviewUrls.forEach((url) => URL.revokeObjectURL(url));
         };
     }, [editSourceImagePreviewUrls]);
-
-    const readHistoryFromStorage = React.useCallback((): HistoryMetadata[] => {
-        try {
-            const storedHistory = localStorage.getItem('openaiImageHistory');
-            if (storedHistory) {
-                const parsedHistory: HistoryMetadata[] = JSON.parse(storedHistory);
-                if (Array.isArray(parsedHistory)) {
-                    return parsedHistory;
-                }
-
-                console.warn('Invalid history data found in localStorage.');
-                localStorage.removeItem('openaiImageHistory');
-            }
-        } catch (e) {
-            console.error('Failed to load or parse history from localStorage:', e);
-            localStorage.removeItem('openaiImageHistory');
-        }
-
-        return [];
-    }, []);
-
-    React.useEffect(() => {
-        setHistory(readHistoryFromStorage());
-        setIsInitialLoad(false);
-    }, [readHistoryFromStorage]);
-
-    React.useEffect(() => {
-        const refreshHistory = () => {
-            setHistory(readHistoryFromStorage());
-        };
-
-        const refreshWhenVisible = () => {
-            if (!document.hidden) {
-                refreshHistory();
-            }
-        };
-
-        window.addEventListener('pageshow', refreshHistory);
-        window.addEventListener('focus', refreshHistory);
-        document.addEventListener('visibilitychange', refreshWhenVisible);
-
-        return () => {
-            window.removeEventListener('pageshow', refreshHistory);
-            window.removeEventListener('focus', refreshHistory);
-            document.removeEventListener('visibilitychange', refreshWhenVisible);
-        };
-    }, [readHistoryFromStorage]);
-
-    React.useEffect(() => {
-        const fetchAuthStatus = async () => {
-            try {
-                const response = await fetch('/api/auth-status');
-                if (!response.ok) {
-                    throw new Error('Failed to fetch auth status');
-                }
-                const data = await response.json();
-                setIsPasswordRequiredByBackend(data.passwordRequired);
-            } catch (error) {
-                console.error('Error fetching auth status:', error);
-                setIsPasswordRequiredByBackend(false);
-            }
-        };
-
-        fetchAuthStatus();
-        const storedHash = localStorage.getItem('clientPasswordHash');
-        if (storedHash) {
-            setClientPasswordHash(storedHash);
-        }
-    }, []);
-
-    React.useEffect(() => {
-        if (!isInitialLoad) {
-            try {
-                localStorage.setItem('openaiImageHistory', JSON.stringify(history));
-            } catch (e) {
-                console.error('Failed to save history to localStorage:', e);
-            }
-        }
-    }, [history, isInitialLoad]);
-
-    React.useEffect(() => {
-        return () => {
-            editSourceImagePreviewUrls.forEach((url) => URL.revokeObjectURL(url));
-        };
-    }, [editSourceImagePreviewUrls]);
-
-    React.useEffect(() => {
-        const storedPref = localStorage.getItem('imageGenSkipDeleteConfirm');
-        if (storedPref === 'true') {
-            setSkipDeleteConfirmation(true);
-        } else if (storedPref === 'false') {
-            setSkipDeleteConfirmation(false);
-        }
-    }, []);
-
-    React.useEffect(() => {
-        localStorage.setItem('imageGenSkipDeleteConfirm', String(skipDeleteConfirmation));
-    }, [skipDeleteConfirmation]);
 
     React.useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {
@@ -684,7 +460,7 @@ export default function HomePage() {
                 const actualMimeType = getMimeTypeFromFormat(img.output_format);
                 const blob = new Blob([byteArray], { type: actualMimeType });
 
-                await db.images.put({ filename: img.filename, blob });
+                await db.images.put({ userId: activeImageUserId ?? LEGACY_IMAGE_USER_ID, filename: img.filename, blob });
 
                 const previousBlobUrl = blobUrlCacheRef.current.get(img.filename);
                 if (previousBlobUrl) {
@@ -693,10 +469,6 @@ export default function HomePage() {
 
                 const blobUrl = URL.createObjectURL(blob);
                 blobUrlCacheRef.current.set(img.filename, blobUrl);
-                setImageSrcByFilename((current) => ({
-                    ...current,
-                    [img.filename]: blobUrl
-                }));
 
                 return {
                     filename: img.filename,
@@ -739,13 +511,15 @@ export default function HomePage() {
 
         const apiFormData = new FormData();
         const apiKey = apiKeyDraft.trim() || settings.apiKey.trim();
-        const baseUrl = baseUrlDraft.trim() || settings.baseUrl.trim();
+
+        if (authMode === 'sub2api' && (!isAuthReady || !image2User)) {
+            setError(t('page.unauthorized'));
+            setIsLoading(false);
+            return;
+        }
 
         if (apiKey) {
             apiFormData.append('apiKey', apiKey);
-        }
-        if (baseUrl) {
-            apiFormData.append('baseUrl', baseUrl);
         }
         apiFormData.append('responseLanguage', language);
 
@@ -801,6 +575,13 @@ export default function HomePage() {
             }
         } else {
             const editData = formData as EditingFormData;
+            
+            // ✅【修复】图片编辑必须校验是否上传了图片
+            if (!editData.imageFiles || editData.imageFiles.length === 0) {
+                setError(t('page.noImageSelectedForEditing')); // 没有图片就报错并退出
+                setIsLoading(false);
+                return;
+            }
             requestModel = editData.model;
             requestImageCount = editData.n;
             apiFormData.append('model', requestModel);
@@ -1100,6 +881,11 @@ export default function HomePage() {
             const result: ImageApiResult = await response.json();
 
             if (!response.ok) {
+                if (response.status === 401 && authMode === 'sub2api' && result.loginUrl) {
+                    window.location.assign(result.loginUrl);
+                    return;
+                }
+
                 if (response.status === 401 && isPasswordRequiredByBackend) {
                     setError(t('page.unauthorized'));
                     setApiResponseInfo((current) =>
@@ -1229,73 +1015,6 @@ export default function HomePage() {
         }
     };
 
-    const handleHistorySelect = React.useCallback(
-        (item: HistoryMetadata, imageIndex = 0) => {
-            const selectedBatchPromises = item.images.map(async (imgInfo) => {
-                const originalStorageMode = item.storageModeUsed || 'fs';
-                const path =
-                    getImageSrc(imgInfo.filename) ??
-                    (originalStorageMode === 'fs' && isImageCacheReady ? `/api/image/${imgInfo.filename}` : undefined);
-
-                if (path) {
-                    return { path, filename: imgInfo.filename, revisedPrompt: imgInfo.revisedPrompt };
-                } else {
-                    console.warn(
-                        `Could not get image source for history item: ${imgInfo.filename} (mode: ${originalStorageMode})`
-                    );
-                    setError(t('page.historyImageLoadError', { filename: imgInfo.filename }));
-                    return null;
-                }
-            });
-
-            Promise.all(selectedBatchPromises).then((resolvedBatch) => {
-                const validImages = resolvedBatch.filter(Boolean) as ImageBatchItem[];
-                const selectedFilename = item.images[imageIndex]?.filename;
-                const selectedValidIndex = selectedFilename
-                    ? validImages.findIndex((image) => image.filename === selectedFilename)
-                    : -1;
-
-                if (validImages.length !== item.images.length) {
-                    setError(t('page.historyImagesLoadSomeError'));
-                } else {
-                    setError(null);
-                }
-
-                setLatestImageBatch(validImages.length > 0 ? validImages : null);
-                setLatestBatchPrompt(validImages.length > 0 ? item.prompt : '');
-                setImageOutputView(validImages.length > 0 ? Math.max(0, selectedValidIndex) : 'grid');
-            });
-        },
-        [getImageSrc, isImageCacheReady, t]
-    );
-
-    const handleClearHistory = React.useCallback(async () => {
-        const confirmationMessage =
-            effectiveStorageModeClient === 'indexeddb'
-                ? t('history.clearConfirmIndexedDb')
-                : t('history.clearConfirmFs');
-
-        if (window.confirm(confirmationMessage)) {
-            setHistory([]);
-            setLatestImageBatch(null);
-            setLatestBatchPrompt('');
-            setImageOutputView('grid');
-            setError(null);
-
-            try {
-                localStorage.removeItem('openaiImageHistory');
-
-                await db.images.clear();
-                blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
-                blobUrlCacheRef.current.clear();
-                setImageSrcByFilename({});
-            } catch (e) {
-                console.error('Failed during history clearing:', e);
-                setError(t('page.clearHistoryError', { message: e instanceof Error ? e.message : String(e) }));
-            }
-        }
-    }, [t]);
-
     const handleSendToEdit = async (filename: string) => {
         if (isSendingToEdit) return;
         setIsSendingToEdit(true);
@@ -1356,87 +1075,6 @@ export default function HomePage() {
         }
     };
 
-    const executeDeleteItem = React.useCallback(
-        async (item: HistoryMetadata) => {
-            if (!item) return;
-            setError(null);
-
-            const { images: imagesInEntry, storageModeUsed, timestamp } = item;
-            const storageMode = storageModeUsed || 'fs';
-            const filenamesToDelete = imagesInEntry.map((img) => img.filename);
-
-            try {
-                await db.images.where('filename').anyOf(filenamesToDelete).delete();
-                filenamesToDelete.forEach((fn) => {
-                    const url = blobUrlCacheRef.current.get(fn);
-                    if (url) URL.revokeObjectURL(url);
-                    blobUrlCacheRef.current.delete(fn);
-                });
-                setImageSrcByFilename((current) => {
-                    const next = { ...current };
-                    filenamesToDelete.forEach((filename) => {
-                        delete next[filename];
-                    });
-                    return next;
-                });
-
-                if (storageMode === 'fs') {
-                    const apiPayload: { filenames: string[]; passwordHash?: string } = {
-                        filenames: filenamesToDelete
-                    };
-                    if (isPasswordRequiredByBackend && clientPasswordHash) {
-                        apiPayload.passwordHash = clientPasswordHash;
-                    }
-
-                    const response = await fetch('/api/image-delete', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(apiPayload)
-                    });
-
-                    const result = await response.json();
-                    if (!response.ok) {
-                        throw new Error(result.error || t('page.deleteApiFailed', { status: response.status }));
-                    }
-                }
-
-                setHistory((prevHistory) => prevHistory.filter((h) => h.timestamp !== timestamp));
-                setLatestImageBatch((prev) =>
-                    prev && prev.some((img) => filenamesToDelete.includes(img.filename)) ? null : prev
-                );
-            } catch (e: unknown) {
-                console.error('Error during item deletion:', e);
-                setError(e instanceof Error ? e.message : t('page.unexpectedDeleteError'));
-            } finally {
-                setItemToDeleteConfirm(null);
-            }
-        },
-        [isPasswordRequiredByBackend, clientPasswordHash, t]
-    );
-
-    const handleRequestDeleteItem = React.useCallback(
-        (item: HistoryMetadata) => {
-            if (!skipDeleteConfirmation) {
-                setDialogCheckboxStateSkipConfirm(skipDeleteConfirmation);
-                setItemToDeleteConfirm(item);
-            } else {
-                executeDeleteItem(item);
-            }
-        },
-        [skipDeleteConfirmation, executeDeleteItem]
-    );
-
-    const handleConfirmDeletion = React.useCallback(() => {
-        if (itemToDeleteConfirm) {
-            executeDeleteItem(itemToDeleteConfirm);
-            setSkipDeleteConfirmation(dialogCheckboxStateSkipConfirm);
-        }
-    }, [itemToDeleteConfirm, executeDeleteItem, dialogCheckboxStateSkipConfirm]);
-
-    const handleCancelDeletion = React.useCallback(() => {
-        setItemToDeleteConfirm(null);
-    }, []);
-
     const apiInfoStatusLabel =
         apiResponseInfo?.status === 'loading'
             ? t('apiInfo.statusLoading')
@@ -1493,8 +1131,16 @@ export default function HomePage() {
         );
     }
 
+    if (authMode === 'sub2api' && !isAuthReady) {
+        return (
+            <main className='flex h-dvh items-center justify-center overflow-hidden bg-slate-50 text-slate-900 dark:bg-[#0d1015] dark:text-white'>
+                <p className='text-sm text-slate-500 dark:text-white/60'>{t('history.loading')}</p>
+            </main>
+        );
+    }
+
     return (
-        <main className='min-h-screen bg-black p-3 text-white md:p-4 lg:h-screen lg:overflow-hidden'>
+        <main className='h-dvh overflow-hidden bg-slate-50 text-slate-900 dark:bg-[#0d1015] dark:text-white'>
             <PasswordDialog
                 isOpen={isPasswordDialogOpen}
                 onOpenChange={setIsPasswordDialogOpen}
@@ -1506,407 +1152,424 @@ export default function HomePage() {
                         : t('page.setPasswordDescription')
                 }
             />
-            <div className='flex min-h-screen w-full flex-col gap-3 lg:h-full lg:min-h-0'>
-                <header className='shrink-0 rounded-lg border border-white/10 bg-black/95 px-4 py-3 shadow-sm'>
-                    <div className='flex flex-col gap-3'>
-                        <div className='flex flex-col gap-3 md:flex-row md:items-center md:justify-between'>
-                            <div className='min-w-0'>
-                                <p className='text-xs font-medium tracking-[0.16em] text-white/45 uppercase'>
-                                    {t('home.kicker')}
-                                </p>
-                                <h1 className='mt-0.5 truncate text-2xl font-semibold text-white'>{t('home.title')}</h1>
-                            </div>
 
-                            <div className='flex shrink-0 items-center gap-2 md:justify-end'>
-                                <Languages className='h-4 w-4 text-white/45' />
-                                <Select
-                                    value={languagePreference}
-                                    onValueChange={(value) => setLanguagePreference(value as LanguagePreference)}>
-                                    <SelectTrigger
-                                        aria-label={t('settings.languageAria')}
-                                        className='h-8 w-[132px] border-white/20 bg-black text-sm text-white focus:border-white/50 focus:ring-white/50'>
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent className='border-white/20 bg-black text-white'>
-                                        <SelectItem value='system' className='focus:bg-white/10'>
-                                            {t('settings.system')}
-                                        </SelectItem>
-                                        <SelectItem value='en' className='focus:bg-white/10'>
-                                            {t('settings.english')}
-                                        </SelectItem>
-                                        <SelectItem value='zh' className='focus:bg-white/10'>
-                                            {t('settings.chinese')}
-                                        </SelectItem>
-                                    </SelectContent>
-                                </Select>
-                                <Button
-                                    type='button'
-                                    variant='outline'
-                                    size='icon'
-                                    onClick={handleThemeToggle}
-                                    className='h-8 w-8 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
-                                    aria-label={t('home.toggleTheme')}>
-                                    {currentTheme === 'dark' ? (
-                                        <Moon className='h-4 w-4' />
-                                    ) : (
-                                        <Sun className='h-4 w-4' />
-                                    )}
-                                </Button>
-                            </div>
-                        </div>
+            <Dialog open={showHelpDialog} onOpenChange={setShowHelpDialog}>
+                <DialogContent className='max-h-[82dvh] overflow-hidden rounded-md border border-slate-200 bg-[#fbfbfc] p-0 sm:max-w-[720px] dark:border-white/10 dark:bg-[#0f1115]'>
+                    <DialogHeader className='border-b border-slate-200 px-4 py-3 dark:border-white/10'>
+                        <DialogTitle className='text-[14px] font-semibold text-slate-900 dark:text-white'>
+                            {t('help.title')}
+                        </DialogTitle>
+                    </DialogHeader>
+                    <div className='max-h-[70dvh] overflow-y-auto p-3'>
+                        <HelpNotes />
+                    </div>
+                </DialogContent>
+            </Dialog>
 
-                        <div className='grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,0.85fr)_minmax(220px,0.85fr)_minmax(340px,1.3fr)] xl:items-start'>
-                            <div className='min-w-0'>
-                                <Label
-                                    htmlFor='home-api-base-url'
-                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
-                                    <Globe2 className='h-3.5 w-3.5' />
-                                    {t('settings.baseUrl')}
-                                </Label>
-                                <Input
-                                    id='home-api-base-url'
-                                    type='url'
-                                    value={baseUrlDraft}
-                                    onChange={(event) => handleBaseUrlChange(event.target.value)}
-                                    placeholder={t('settings.baseUrlPlaceholder')}
-                                    className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
+            <div className='flex h-full min-h-0 flex-col overflow-hidden'>
+                <div className='flex h-full min-h-0 flex-col overflow-hidden'>
+                    <AppTopbar
+                        currentTheme={currentTheme}
+                        menuLabel={mode === 'edit' ? t('mode.edit') : t('nav.generate')}
+                        onOpenHelp={() => setShowHelpDialog(true)}
+                        onOpenHistory={() => router.push('/history')}
+                        onOpenSettings={() => setShowPreferences(true)}
+                        onToggleTheme={handleThemeToggle}
+                    />
+
+                    <PreferencesPanel
+                        open={showPreferences}
+                        onClose={() => setShowPreferences(false)}
+                        onSave={() => setShowPreferences(false)}
+                        apiKeyDraft={apiKeyDraft}
+                        configuredBaseUrl={configuredBaseUrl}
+                        isFetchingModels={isFetchingModels}
+                        isModelMenuOpen={isModelMenuOpen}
+                        keysUrl={keysUrl}
+                        languagePreference={languagePreference}
+                        modelDraft={modelDraft}
+                        modelFetchError={modelFetchError}
+                        modelMenuRef={modelMenuRef}
+                        onApiKeyChange={handleApiKeyChange}
+                        onLanguagePreferenceChange={setLanguagePreference}
+                        onModelBlur={(event) => {
+                            const nextFocusedElement = event.relatedTarget;
+                            if (nextFocusedElement && modelMenuRef.current?.contains(nextFocusedElement)) {
+                                return;
+                            }
+
+                            saveModelChoice(modelDraft);
+                        }}
+                        onModelChange={(value) => {
+                            handleModelChange(value);
+                            setIsModelMenuOpen(true);
+                        }}
+                        onModelSelect={(value) => {
+                            handleModelSelect(value);
+                            setIsModelMenuOpen(false);
+                        }}
+                        onToggleApiKeyVisibility={() => setShowApiKey((current) => !current)}
+                        onToggleModelMenu={() => {
+                            setIsModelMenuOpen((current) => !current);
+                            fetchModelOptions();
+                        }}
+                        selectedModel={selectedModel}
+                        showApiKey={showApiKey}
+                        visibleModelOptions={filteredModelOptions}
+                    />
+
+                    <MobileParametersPanel
+                        open={showMobileSettings}
+                        onOpenChange={setShowMobileSettings}
+                        mode={mode}
+                        generationProps={{
+                            onSubmit: handleApiCall,
+                            isLoading,
+                            currentMode: mode,
+                            onModeChange: setMode,
+                            isPasswordRequiredByBackend,
+                            clientPasswordHash,
+                            onOpenPasswordDialog: handleOpenPasswordDialog,
+                            model: selectedModel,
+                            prompt: genPrompt,
+                            setPrompt: setGenPrompt,
+                            n: genN,
+                            setN: setGenN,
+                            size: genSize,
+                            setSize: setGenSize,
+                            customWidth: genCustomWidth,
+                            setCustomWidth: setGenCustomWidth,
+                            customHeight: genCustomHeight,
+                            setCustomHeight: setGenCustomHeight,
+                            quality: genQuality,
+                            setQuality: setGenQuality,
+                            outputFormat: genOutputFormat,
+                            setOutputFormat: setGenOutputFormat,
+                            compression: genCompression,
+                            setCompression: setGenCompression,
+                            background: genBackground,
+                            setBackground: setGenBackground,
+                            moderation: genModeration,
+                            setModeration: setGenModeration,
+                            streamEnabled: genStreamEnabled,
+                            setStreamEnabled: setGenStreamEnabled
+                        }}
+                        editingProps={{
+                            onSubmit: handleApiCall,
+                            isLoading: isLoading || isSendingToEdit,
+                            isPasswordRequiredByBackend,
+                            clientPasswordHash,
+                            onOpenPasswordDialog: handleOpenPasswordDialog,
+                            editModel: selectedModel,
+                            imageFiles: editImageFiles,
+                            sourceImagePreviewUrls: editSourceImagePreviewUrls,
+                            setImageFiles: setEditImageFiles,
+                            setSourceImagePreviewUrls: setEditSourceImagePreviewUrls,
+                            maxImages: MAX_EDIT_IMAGES,
+                            editPrompt,
+                            setEditPrompt,
+                            editN,
+                            setEditN,
+                            editSize,
+                            setEditSize,
+                            editCustomWidth,
+                            setEditCustomWidth,
+                            editCustomHeight,
+                            setEditCustomHeight,
+                            editQuality,
+                            setEditQuality,
+                            editBrushSize,
+                            setEditBrushSize,
+                            editShowMaskEditor,
+                            setEditShowMaskEditor,
+                            editGeneratedMaskFile,
+                            setEditGeneratedMaskFile,
+                            editIsMaskSaved,
+                            setEditIsMaskSaved,
+                            editOriginalImageSize,
+                            setEditOriginalImageSize,
+                            editDrawnPoints,
+                            setEditDrawnPoints,
+                            editMaskPreviewUrl,
+                            setEditMaskPreviewUrl
+                        }}
+                    />
+
+                    <div className='min-h-0 flex-1 overflow-hidden lg:w-full lg:flex-1 lg:overflow-hidden'>
+                        <div className='flex h-full min-h-0 flex-col overflow-hidden pb-[calc(3rem+env(safe-area-inset-bottom))] lg:hidden'>
+                            {error && (
+                                <Alert
+                                    variant='destructive'
+                                    className='m-2 max-h-24 shrink-0 overflow-y-auto border-red-300 bg-red-50 text-red-700 dark:border-red-500/50 dark:bg-red-900/20 dark:text-red-300'>
+                                    <AlertTitle className='text-red-700 dark:text-red-200'>{t('common.error')}</AlertTitle>
+                                    <AlertDescription className='text-[12px]'>{error}</AlertDescription>
+                                </Alert>
+                            )}
+
+                            <section className='min-h-0 flex-1 overflow-hidden border-b border-slate-200 dark:border-white/10'>
+                                <ImageOutput
+                                    imageBatch={latestImageBatch}
+                                    promptText={latestBatchPrompt}
+                                    viewMode={imageOutputView}
+                                    onViewChange={setImageOutputView}
+                                    altText={t('output.generatedAlt')}
+                                    isLoading={isLoading || isSendingToEdit}
+                                    elapsedSeconds={elapsedSeconds}
+                                    onSendToEdit={handleSendToEdit}
+                                    currentMode={mode}
+                                    baseImagePreviewUrl={editSourceImagePreviewUrls[0] || null}
                                 />
-                            </div>
+                            </section>
 
-                            <div ref={modelMenuRef} className='relative min-w-0'>
-                                <Label
-                                    htmlFor='home-model'
-                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
-                                    <Cpu className='h-3.5 w-3.5' />
-                                    {t('common.model')}
-                                </Label>
-                                <div className='flex gap-2'>
-                                    <Input
-                                        id='home-model'
-                                        value={modelDraft}
-                                        onChange={(event) => {
-                                            handleModelChange(event.target.value);
-                                            setIsModelMenuOpen(true);
-                                        }}
-                                        onFocus={() => setIsModelMenuOpen(true)}
-                                        onBlur={(event) => {
-                                            const nextFocusedElement = event.relatedTarget;
-                                            if (
-                                                nextFocusedElement &&
-                                                modelMenuRef.current?.contains(nextFocusedElement)
-                                            ) {
-                                                return;
-                                            }
+                            <section className='shrink-0 border-b border-slate-200 dark:border-white/10'>
+                                <GenerationWorkspace
+                                    customSizeInvalid={mode === 'edit' ? editCustomSizeInvalid : genCustomSizeInvalid}
+                                    isLoading={isLoading || isSendingToEdit}
+                                    mode={mode}
+                                    onSwitchToGenerate={() => setMode('generate')}
+                                    onGenerate={() =>
+                                        mode === 'edit'
+                                            ? handleApiCall({
+                                                  prompt: genPrompt,
+                                                  n: editN[0],
+                                                  size: editSize,
+                                                  customWidth: editCustomWidth,
+                                                  customHeight: editCustomHeight,
+                                                  quality: editQuality,
+                                                  imageFiles: editImageFiles,
+                                                  maskFile: editGeneratedMaskFile,
+                                                  model: selectedModel
+                                              })
+                                            : handleApiCall({
+                                                  prompt: genPrompt,
+                                                  n: genN[0],
+                                                  size: genSize,
+                                                  customWidth: genCustomWidth,
+                                                  customHeight: genCustomHeight,
+                                                  quality: genQuality,
+                                                  output_format: genOutputFormat,
+                                                  ...(genOutputFormat === 'jpeg' || genOutputFormat === 'webp'
+                                                      ? { output_compression: genCompression[0] }
+                                                      : {}),
+                                                  background: genBackground,
+                                                  moderation: genModeration,
+                                                  model: selectedModel,
+                                                  stream: genStreamEnabled && genN[0] === 1,
+                                                  partialImages: 2
+                                              })
+                                    }
+                                    onSwitchToEdit={() => setMode('edit')}
+                                    prompt={genPrompt}
+                                    setPrompt={setGenPrompt}
+                                />
+                            </section>
 
-                                            saveModelChoice(modelDraft);
-                                        }}
-                                        placeholder={t('settings.modelPlaceholder')}
-                                        className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
-                                    />
-                                    <Button
+                            <section className='shrink-0 border-b border-slate-200 bg-[#fbfbfc] px-3 py-2 dark:border-white/10 dark:bg-[#0f1115]'>
+                                <div className='flex h-9 w-full items-center gap-2 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:border-white/10 dark:bg-white/[0.03] dark:text-white/80'>
+                                    <button
                                         type='button'
-                                        variant='outline'
-                                        size='icon'
-                                        onClick={() => {
-                                            setIsModelMenuOpen((current) => !current);
-                                            fetchModelOptions();
-                                        }}
-                                        className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
-                                        aria-label={t('settings.models')}>
-                                        {isFetchingModels ? (
-                                            <Loader2 className='h-4 w-4 animate-spin' />
-                                        ) : (
-                                            <ChevronDown className='h-4 w-4' />
-                                        )}
-                                    </Button>
+                                        onClick={() => setShowMobileSettings(true)}
+                                        className='min-w-0 flex-1 truncate text-left font-medium'>
+                                        {mode === 'edit' ? t('workspace.imageEdit') : t('workspace.generateMode')}{' '}
+                                        {t('workspace.parameters')}
+                                    </button>
+                                    <button
+                                        type='button'
+                                        onClick={resetCurrentParameters}
+                                        className='flex h-7 shrink-0 items-center gap-1 rounded border border-slate-200 px-2 text-[11px] text-slate-600 hover:bg-slate-50 hover:text-slate-900 dark:border-white/10 dark:text-white/65 dark:hover:bg-white/10 dark:hover:text-white'
+                                        aria-label={t('workspace.resetParameters')}>
+                                        <RotateCcw className='h-3.5 w-3.5' />
+                                        {t('workspace.resetParameters')}
+                                    </button>
+                                    <span className='font-mono text-[11px] text-slate-500 dark:text-white/45'>
+                                        {mobileParameterSummary}
+                                    </span>
                                 </div>
-                                {isModelMenuOpen && (
-                                    <div className='absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-white/20 bg-black p-1 text-sm text-white shadow-lg'>
-                                        {isFetchingModels && (
-                                            <div className='flex items-center gap-2 px-2 py-2 text-xs text-white/50'>
-                                                <Loader2 className='h-3.5 w-3.5 animate-spin' />
-                                                {t('settings.modelsLoading')}
-                                            </div>
-                                        )}
-                                        {!isFetchingModels &&
-                                            filteredModelOptions.map((model) => (
-                                                <button
-                                                    key={model}
-                                                    type='button'
-                                                    onMouseDown={(event) => event.preventDefault()}
-                                                    onClick={() => {
-                                                        handleModelSelect(model);
-                                                        setIsModelMenuOpen(false);
-                                                    }}
-                                                    className='block w-full rounded px-2 py-1.5 text-left text-white/80 hover:bg-white/10 hover:text-white'>
-                                                    {model}
-                                                </button>
-                                            ))}
-                                        {!isFetchingModels && filteredModelOptions.length === 0 && (
-                                            <div className='px-2 py-2 text-xs text-white/45'>
-                                                {modelFetchError || t('settings.noModelsFound')}
-                                            </div>
-                                        )}
-                                        {!isFetchingModels && filteredModelOptions.length > 0 && modelFetchError && (
-                                            <div className='border-t border-white/10 px-2 py-1.5 text-xs text-yellow-300/80'>
-                                                {modelFetchError}
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
+                            </section>
 
-                            <div className='min-w-0 md:col-span-2 xl:col-span-1'>
-                                <Label
-                                    htmlFor='home-api-key'
-                                    className='mb-1.5 flex items-center gap-1.5 text-xs font-medium text-white/70'>
-                                    <KeyRound className='h-3.5 w-3.5' />
-                                    {t('settings.apiKey')}
-                                </Label>
-                                <div className='flex gap-2'>
-                                    <Input
-                                        id='home-api-key'
-                                        type={showApiKey ? 'text' : 'password'}
-                                        value={apiKeyDraft}
-                                        onChange={(event) => handleApiKeyChange(event.target.value)}
-                                        placeholder={t('settings.apiKeyPlaceholder')}
-                                        className='h-9 border-white/20 bg-black text-white placeholder:text-white/35 focus:border-white/50 focus:ring-white/50'
-                                    />
-                                    <Button
-                                        type='button'
-                                        variant='outline'
-                                        size='icon'
-                                        onClick={() => setShowApiKey((current) => !current)}
-                                        className='h-9 w-9 border-white/20 text-white/75 hover:bg-white/10 hover:text-white'
-                                        aria-label={showApiKey ? t('home.hideApiKey') : t('home.showApiKey')}>
-                                        {showApiKey ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
-                                    </Button>
-                                    <Button
-                                        asChild={Boolean(tokenConsoleUrl)}
-                                        type='button'
-                                        variant='outline'
-                                        disabled={!tokenConsoleUrl}
-                                        className='h-9 shrink-0 border-white/20 px-2.5 text-xs text-white/75 hover:bg-white/10 hover:text-white'>
-                                        {tokenConsoleUrl ? (
-                                            <a
-                                                href={tokenConsoleUrl}
-                                                target='_blank'
-                                                rel='noreferrer'
-                                                aria-label={t('home.getApiKeyAria')}>
-                                                <ExternalLink className='h-3.5 w-3.5' />
-                                                {t('home.getApiKey')}
-                                            </a>
-                                        ) : (
-                                            <>
-                                                <ExternalLink className='h-3.5 w-3.5' />
-                                                {t('home.getApiKey')}
-                                            </>
-                                        )}
-                                    </Button>
-                                </div>
-                            </div>
                         </div>
 
-                        <div className='flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2'>
-                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
-                                {baseUrlDraft.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
-                                {t('settings.baseUrlHelp')}
-                            </p>
-                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
-                                {selectedModel.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
-                                {t('home.modelHelp')}
-                            </p>
-                            <p className='flex min-h-4 items-center gap-1.5 text-xs text-white/45'>
-                                {apiKeyDraft.trim() && <CheckCircle2 className='h-3.5 w-3.5 text-green-400' />}
-                                {t('home.apiKeyHelp')}
-                            </p>
+                        <div className='hidden h-full gap-0 lg:grid lg:grid-cols-[320px_minmax(0,1fr)]'>
+                            <section className='flex h-full min-h-0 flex-col border-r border-slate-200 bg-[#fbfbfc] dark:border-white/10 dark:bg-[#0f1115]'>
+                                <div className='border-b border-slate-200 px-4 py-3 dark:border-white/10'>
+                                    <p className='text-[13px] font-semibold text-slate-900 dark:text-white'>图像生成</p>
+                                </div>
+                                <div className='min-h-0 flex-1 overflow-hidden p-4'>
+                                    <div className={mode === 'generate' ? 'block h-full min-h-0' : 'hidden'}>
+                                        <GenerationForm
+                                            onSubmit={handleApiCall}
+                                            isLoading={isLoading}
+                                            currentMode={mode}
+                                            onModeChange={setMode}
+                                            isPasswordRequiredByBackend={isPasswordRequiredByBackend}
+                                            clientPasswordHash={clientPasswordHash}
+                                            onOpenPasswordDialog={handleOpenPasswordDialog}
+                                            model={selectedModel}
+                                            prompt={genPrompt}
+                                            setPrompt={setGenPrompt}
+                                            n={genN}
+                                            setN={setGenN}
+                                            size={genSize}
+                                            setSize={setGenSize}
+                                            customWidth={genCustomWidth}
+                                            setCustomWidth={setGenCustomWidth}
+                                            customHeight={genCustomHeight}
+                                            setCustomHeight={setGenCustomHeight}
+                                            quality={genQuality}
+                                            setQuality={setGenQuality}
+                                            outputFormat={genOutputFormat}
+                                            setOutputFormat={setGenOutputFormat}
+                                            compression={genCompression}
+                                            setCompression={setGenCompression}
+                                            background={genBackground}
+                                            setBackground={setGenBackground}
+                                            moderation={genModeration}
+                                            setModeration={setGenModeration}
+                                            streamEnabled={genStreamEnabled}
+                                            setStreamEnabled={setGenStreamEnabled}
+                                        />
+                                    </div>
+
+                                    <div className={mode === 'edit' ? 'block h-full min-h-0' : 'hidden'}>
+                                        <EditingForm
+                                            onSubmit={handleApiCall}
+                                            isLoading={isLoading || isSendingToEdit}
+                                            isPasswordRequiredByBackend={isPasswordRequiredByBackend}
+                                            clientPasswordHash={clientPasswordHash}
+                                            onOpenPasswordDialog={handleOpenPasswordDialog}
+                                            editModel={selectedModel}
+                                            imageFiles={editImageFiles}
+                                            sourceImagePreviewUrls={editSourceImagePreviewUrls}
+                                            setImageFiles={setEditImageFiles}
+                                            setSourceImagePreviewUrls={setEditSourceImagePreviewUrls}
+                                            maxImages={MAX_EDIT_IMAGES}
+                                            editPrompt={editPrompt}
+                                            setEditPrompt={setEditPrompt}
+                                            editN={editN}
+                                            setEditN={setEditN}
+                                            editSize={editSize}
+                                            setEditSize={setEditSize}
+                                            editCustomWidth={editCustomWidth}
+                                            setEditCustomWidth={setEditCustomWidth}
+                                            editCustomHeight={editCustomHeight}
+                                            setEditCustomHeight={setEditCustomHeight}
+                                            editQuality={editQuality}
+                                            setEditQuality={setEditQuality}
+                                            editBrushSize={editBrushSize}
+                                            setEditBrushSize={setEditBrushSize}
+                                            editShowMaskEditor={editShowMaskEditor}
+                                            setEditShowMaskEditor={setEditShowMaskEditor}
+                                            editGeneratedMaskFile={editGeneratedMaskFile}
+                                            setEditGeneratedMaskFile={setEditGeneratedMaskFile}
+                                            editIsMaskSaved={editIsMaskSaved}
+                                            setEditIsMaskSaved={setEditIsMaskSaved}
+                                            editOriginalImageSize={editOriginalImageSize}
+                                            setEditOriginalImageSize={setEditOriginalImageSize}
+                                            editDrawnPoints={editDrawnPoints}
+                                            setEditDrawnPoints={setEditDrawnPoints}
+                                            editMaskPreviewUrl={editMaskPreviewUrl}
+                                            setEditMaskPreviewUrl={setEditMaskPreviewUrl}
+                                        />
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section className='flex h-full min-h-0 flex-col bg-[#fbfbfc] dark:bg-[#0f1115]'>
+                                <div className='border-b border-slate-200 px-4 py-3 dark:border-white/10'>
+                                    <p className='text-[13px] font-semibold text-slate-900 dark:text-white'>工作区</p>
+                                </div>
+                                <div className='flex min-h-0 flex-1 flex-col overflow-hidden p-0'>
+                                    {error && (
+                                        <Alert
+                                            variant='destructive'
+                                            className='m-4 shrink-0 border-red-300 bg-red-50 text-red-700 dark:border-red-500/50 dark:bg-red-900/20 dark:text-red-300'>
+                                            <AlertTitle className='text-red-700 dark:text-red-200'>{t('common.error')}</AlertTitle>
+                                            <AlertDescription>{error}</AlertDescription>
+                                        </Alert>
+                                    )}
+                                    <div className='flex min-h-0 flex-1 flex-col overflow-hidden'>
+                                        <div className='min-h-0 flex-1 border-b border-slate-200 dark:border-white/10'>
+                                            <ImageOutput
+                                                imageBatch={latestImageBatch}
+                                                promptText={latestBatchPrompt}
+                                                viewMode={imageOutputView}
+                                                onViewChange={setImageOutputView}
+                                                altText={t('output.generatedAlt')}
+                                                isLoading={isLoading || isSendingToEdit}
+                                                elapsedSeconds={elapsedSeconds}
+                                                onSendToEdit={handleSendToEdit}
+                                                currentMode={mode}
+                                                baseImagePreviewUrl={editSourceImagePreviewUrls[0] || null}
+                                            />
+                                        </div>
+                                        <div className='border-b border-slate-200 dark:border-white/10'>
+                                            <GenerationWorkspace
+                                                customSizeInvalid={
+                                                    mode === 'edit' ? editCustomSizeInvalid : genCustomSizeInvalid
+                                                }
+                                                isLoading={isLoading}
+                                                mode={mode}
+                                                onSwitchToGenerate={() => setMode('generate')}
+                                                onGenerate={() =>
+                                                    mode === 'edit'
+                                                        ? handleApiCall({
+                                                              prompt: genPrompt,
+                                                              n: editN[0],
+                                                              size: editSize,
+                                                              customWidth: editCustomWidth,
+                                                              customHeight: editCustomHeight,
+                                                              quality: editQuality,
+                                                              imageFiles: editImageFiles,
+                                                              maskFile: editGeneratedMaskFile,
+                                                              model: selectedModel
+                                                          })
+                                                        : handleApiCall({
+                                                              prompt: genPrompt,
+                                                              n: genN[0],
+                                                              size: genSize,
+                                                              customWidth: genCustomWidth,
+                                                              customHeight: genCustomHeight,
+                                                              quality: genQuality,
+                                                              output_format: genOutputFormat,
+                                                              ...(genOutputFormat === 'jpeg' || genOutputFormat === 'webp'
+                                                                  ? { output_compression: genCompression[0] }
+                                                                  : {}),
+                                                              background: genBackground,
+                                                              moderation: genModeration,
+                                                              model: selectedModel,
+                                                              stream: genStreamEnabled && genN[0] === 1,
+                                                              partialImages: 2
+                                                          })
+                                                }
+                                                onSwitchToEdit={() => setMode('edit')}
+                                                prompt={genPrompt}
+                                                setPrompt={setGenPrompt}
+                                            />
+                                        </div>
+                                        <div>
+                                            <ApiInfoPanel
+                                                durationText={apiInfoDuration}
+                                                errorText={apiResponseInfo?.error}
+                                                filenames={apiResponseInfo?.filenames}
+                                                isOpen={showApiResponseInfo}
+                                                onToggle={() => setShowApiResponseInfo((current) => !current)}
+                                                rows={apiInfoRows}
+                                                statusClassName={apiInfoStatusClass}
+                                                statusLabel={apiInfoStatusLabel}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
                         </div>
                     </div>
-                </header>
 
-                <div className='grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(340px,420px)_minmax(300px,1fr)_minmax(280px,320px)] lg:overflow-hidden xl:grid-cols-[minmax(420px,520px)_minmax(420px,1fr)_minmax(320px,360px)] 2xl:grid-cols-[minmax(500px,620px)_minmax(480px,1fr)_minmax(360px,400px)]'>
-                    <section className='relative flex min-h-[620px] flex-col lg:min-h-0 lg:overflow-hidden'>
-                        <div className={mode === 'generate' ? 'block h-full w-full' : 'hidden'}>
-                            <GenerationForm
-                                onSubmit={handleApiCall}
-                                isLoading={isLoading}
-                                currentMode={mode}
-                                onModeChange={setMode}
-                                isPasswordRequiredByBackend={isPasswordRequiredByBackend}
-                                clientPasswordHash={clientPasswordHash}
-                                onOpenPasswordDialog={handleOpenPasswordDialog}
-                                model={selectedModel}
-                                prompt={genPrompt}
-                                setPrompt={setGenPrompt}
-                                n={genN}
-                                setN={setGenN}
-                                size={genSize}
-                                setSize={setGenSize}
-                                customWidth={genCustomWidth}
-                                setCustomWidth={setGenCustomWidth}
-                                customHeight={genCustomHeight}
-                                setCustomHeight={setGenCustomHeight}
-                                quality={genQuality}
-                                setQuality={setGenQuality}
-                                outputFormat={genOutputFormat}
-                                setOutputFormat={setGenOutputFormat}
-                                compression={genCompression}
-                                setCompression={setGenCompression}
-                                background={genBackground}
-                                setBackground={setGenBackground}
-                                moderation={genModeration}
-                                setModeration={setGenModeration}
-                                streamEnabled={genStreamEnabled}
-                                setStreamEnabled={setGenStreamEnabled}
-                            />
-                        </div>
-                        <div className={mode === 'edit' ? 'block h-full w-full' : 'hidden'}>
-                            <EditingForm
-                                onSubmit={handleApiCall}
-                                isLoading={isLoading || isSendingToEdit}
-                                currentMode={mode}
-                                onModeChange={setMode}
-                                isPasswordRequiredByBackend={isPasswordRequiredByBackend}
-                                clientPasswordHash={clientPasswordHash}
-                                onOpenPasswordDialog={handleOpenPasswordDialog}
-                                editModel={selectedModel}
-                                imageFiles={editImageFiles}
-                                sourceImagePreviewUrls={editSourceImagePreviewUrls}
-                                setImageFiles={setEditImageFiles}
-                                setSourceImagePreviewUrls={setEditSourceImagePreviewUrls}
-                                maxImages={MAX_EDIT_IMAGES}
-                                editPrompt={editPrompt}
-                                setEditPrompt={setEditPrompt}
-                                editN={editN}
-                                setEditN={setEditN}
-                                editSize={editSize}
-                                setEditSize={setEditSize}
-                                editCustomWidth={editCustomWidth}
-                                setEditCustomWidth={setEditCustomWidth}
-                                editCustomHeight={editCustomHeight}
-                                setEditCustomHeight={setEditCustomHeight}
-                                editQuality={editQuality}
-                                setEditQuality={setEditQuality}
-                                editBrushSize={editBrushSize}
-                                setEditBrushSize={setEditBrushSize}
-                                editShowMaskEditor={editShowMaskEditor}
-                                setEditShowMaskEditor={setEditShowMaskEditor}
-                                editGeneratedMaskFile={editGeneratedMaskFile}
-                                setEditGeneratedMaskFile={setEditGeneratedMaskFile}
-                                editIsMaskSaved={editIsMaskSaved}
-                                setEditIsMaskSaved={setEditIsMaskSaved}
-                                editOriginalImageSize={editOriginalImageSize}
-                                setEditOriginalImageSize={setEditOriginalImageSize}
-                                editDrawnPoints={editDrawnPoints}
-                                setEditDrawnPoints={setEditDrawnPoints}
-                                editMaskPreviewUrl={editMaskPreviewUrl}
-                                setEditMaskPreviewUrl={setEditMaskPreviewUrl}
-                            />
-                        </div>
-                    </section>
-
-                    <section className='flex min-h-[520px] flex-col lg:min-h-0 lg:overflow-hidden'>
-                        {error && (
-                            <Alert variant='destructive' className='mb-3 border-red-500/50 bg-red-900/20 text-red-300'>
-                                <AlertTitle className='text-red-200'>{t('common.error')}</AlertTitle>
-                                <AlertDescription>{error}</AlertDescription>
-                            </Alert>
-                        )}
-                        <div className='mb-3 shrink-0 rounded-lg border border-white/10 bg-black/95'>
-                            <button
-                                type='button'
-                                onClick={() => setShowApiResponseInfo((current) => !current)}
-                                className='flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-white/80 hover:bg-white/5'>
-                                <span className='flex min-w-0 items-center gap-2'>
-                                    <ChevronDown
-                                        className={`h-4 w-4 shrink-0 transition-transform ${
-                                            showApiResponseInfo ? 'rotate-180' : ''
-                                        }`}
-                                    />
-                                    <span className='font-medium'>{t('apiInfo.toggle')}</span>
-                                    {apiResponseInfo && (
-                                        <span
-                                            className={`rounded-full border px-2 py-0.5 text-[11px] ${apiInfoStatusClass}`}>
-                                            {apiInfoStatusLabel}
-                                        </span>
-                                    )}
-                                </span>
-                                <span className='shrink-0 text-xs text-white/45'>{apiInfoDuration}</span>
-                            </button>
-
-                            {showApiResponseInfo && (
-                                <div className='border-t border-white/10 p-3'>
-                                    {!apiResponseInfo ? (
-                                        <p className='text-xs text-white/45'>{t('apiInfo.empty')}</p>
-                                    ) : (
-                                        <div className='space-y-3'>
-                                            <div className='grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-3'>
-                                                {apiInfoRows.map(([label, value]) => (
-                                                    <div
-                                                        key={label}
-                                                        className='min-w-0 rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5'>
-                                                        <p className='truncate text-white/40'>{label}</p>
-                                                        <p className='mt-0.5 truncate font-medium text-white/80'>
-                                                            {value}
-                                                        </p>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                            {apiResponseInfo.filenames && apiResponseInfo.filenames.length > 0 && (
-                                                <div className='rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-xs'>
-                                                    <p className='mb-1 text-white/40'>{t('apiInfo.files')}</p>
-                                                    <div className='flex flex-wrap gap-1.5'>
-                                                        {apiResponseInfo.filenames.map((filename) => (
-                                                            <span
-                                                                key={filename}
-                                                                className='rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-white/70'>
-                                                                {filename}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
-                                            {apiResponseInfo.error && (
-                                                <div className='rounded-md border border-red-400/30 bg-red-500/10 px-2 py-1.5 text-xs text-red-200'>
-                                                    {apiResponseInfo.error}
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                        <div className='min-h-0 flex-1'>
-                            <ImageOutput
-                                imageBatch={latestImageBatch}
-                                promptText={latestBatchPrompt}
-                                viewMode={imageOutputView}
-                                onViewChange={setImageOutputView}
-                                altText={t('output.generatedAlt')}
-                                isLoading={isLoading || isSendingToEdit}
-                                elapsedSeconds={elapsedSeconds}
-                                onSendToEdit={handleSendToEdit}
-                                currentMode={mode}
-                                baseImagePreviewUrl={editSourceImagePreviewUrls[0] || null}
-                            />
-                        </div>
-                    </section>
-
-                    <section className='min-h-[480px] lg:min-h-0 lg:overflow-hidden'>
-                        <HistoryPanel
-                            history={history}
-                            onSelectImage={handleHistorySelect}
-                            onClearHistory={handleClearHistory}
-                            getImageSrc={getImageSrc}
-                            isImageCacheReady={isImageCacheReady}
-                            onDeleteItemRequest={handleRequestDeleteItem}
-                            itemPendingDeleteConfirmation={itemToDeleteConfirm}
-                            onConfirmDeletion={handleConfirmDeletion}
-                            onCancelDeletion={handleCancelDeletion}
-                            deletePreferenceDialogValue={dialogCheckboxStateSkipConfirm}
-                            onDeletePreferenceDialogChange={setDialogCheckboxStateSkipConfirm}
-                        />
-                    </section>
+                    <MobileBottomNav
+                        currentItem={mode}
+                        onEditClick={() => setMode('edit')}
+                        onGenerateClick={() => setMode('generate')}
+                        onHistoryClick={() => router.push('/history')}
+                    />
                 </div>
             </div>
         </main>

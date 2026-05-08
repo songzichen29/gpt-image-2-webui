@@ -16,22 +16,22 @@ export function ModeToggle({ currentMode, onModeChange }: ModeToggleProps) {
             value={currentMode}
             onValueChange={(value) => onModeChange(value as 'generate' | 'edit')}
             className='w-auto'>
-            <TabsList className='grid h-auto grid-cols-2 gap-1 rounded-md border-none bg-transparent p-0'>
+            <TabsList className='grid h-auto grid-cols-2 gap-1 rounded-md border border-slate-200 bg-slate-50 p-1 dark:border-white/10 dark:bg-white/[0.03]'>
                 <TabsTrigger
                     value='generate'
-                    className={`rounded-md border px-3 py-1 text-sm transition-colors ${
+                    className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                         currentMode === 'generate'
-                            ? 'border-white bg-white text-black'
-                            : 'border-dashed border-white/30 bg-transparent text-white/60 hover:border-white/50 hover:text-white/80'
+                            ? 'border-[#cddbf7] bg-[#edf3ff] text-[#2454c6] dark:border-white/20 dark:bg-white/10 dark:text-white'
+                            : 'border-transparent bg-transparent text-slate-500 hover:bg-white hover:text-slate-900 dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white/85'
                     } `}>
                     {t('mode.generate')}
                 </TabsTrigger>
                 <TabsTrigger
                     value='edit'
-                    className={`rounded-md border px-3 py-1 text-sm transition-colors ${
+                    className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                         currentMode === 'edit'
-                            ? 'border-white bg-white text-black'
-                            : 'border-dashed border-white/30 bg-transparent text-white/60 hover:border-white/50 hover:text-white/80'
+                            ? 'border-[#cddbf7] bg-[#edf3ff] text-[#2454c6] dark:border-white/20 dark:bg-white/10 dark:text-white'
+                            : 'border-transparent bg-transparent text-slate-500 hover:bg-white hover:text-slate-900 dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white/85'
                     } `}>
                     {t('mode.edit')}
                 </TabsTrigger>

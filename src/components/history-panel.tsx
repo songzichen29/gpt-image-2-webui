@@ -92,12 +92,16 @@ function HistoryPanelImpl({
     }, [history]);
 
     const averageCost = totalImages > 0 ? totalCost / totalImages : 0;
+    const orderedHistory = React.useMemo(
+        () => [...history].sort((left, right) => right.timestamp - left.timestamp),
+        [history]
+    );
 
     return (
-        <Card className='flex h-full w-full flex-col overflow-hidden rounded-lg border border-white/10 bg-black'>
-            <CardHeader className='flex flex-row items-center justify-between gap-4 border-b border-white/10 px-4 py-3'>
+        <Card className='flex h-full w-full flex-col overflow-hidden border border-slate-200 bg-[#fbfbfc] dark:border-white/10 dark:bg-[#0f1115]'>
+            <CardHeader className='flex flex-row items-center justify-between gap-4 border-b border-slate-200 px-4 py-2.5 dark:border-white/10'>
                 <div className='flex items-center gap-2'>
-                    <CardTitle className='text-lg font-medium text-white'>{t('history.title')}</CardTitle>
+                    <CardTitle className='text-[13px] font-semibold text-slate-900 dark:text-white'>{t('history.title')}</CardTitle>
                     {totalCost > 0 && (
                         <Dialog open={isTotalCostDialogOpen} onOpenChange={setIsTotalCostDialogOpen}>
                             <DialogTrigger asChild>
@@ -204,19 +208,19 @@ function HistoryPanelImpl({
                         variant='ghost'
                         size='sm'
                         onClick={onClearHistory}
-                        className='h-auto rounded-md px-2 py-1 text-white/60 hover:bg-white/10 hover:text-white'>
+                        className='h-auto rounded-md px-2 py-1 text-[12px] text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white'>
                         {t('common.clear')}
                     </Button>
                 )}
             </CardHeader>
             <CardContent className='min-h-0 flex-1 overflow-y-auto p-2'>
                 {history.length === 0 ? (
-                    <div className='flex h-full items-center justify-center text-white/40'>
+                    <div className='flex h-full items-center justify-center text-slate-400 dark:text-white/40'>
                         <p>{t('history.generatedImagesWillAppear')}</p>
                     </div>
                 ) : (
                     <div className='space-y-2'>
-                        {[...history].map((item) => {
+                        {orderedHistory.map((item) => {
                             const firstImage = item.images?.[0];
                             const imageCount = item.images?.length ?? 0;
                             const itemKey = item.timestamp;
@@ -243,17 +247,17 @@ function HistoryPanelImpl({
                             return (
                                 <article
                                     key={itemKey}
-                                    className='rounded-md border border-white/10 bg-white/[0.035] p-2 transition-colors hover:border-white/20 hover:bg-white/[0.055]'>
+                                    className='rounded-md border border-slate-200 bg-white p-2 transition-colors hover:border-slate-300 dark:border-white/10 dark:bg-white/[0.035] dark:hover:border-white/20 dark:hover:bg-white/[0.055]'>
                                     <div className='flex items-start justify-between gap-2'>
                                         <button
                                             type='button'
                                             onClick={() => onSelectImage(item, 0)}
                                             className='min-w-0 flex-1 text-left'
                                             aria-label={t('history.viewBatchAria', { date: generatedDate })}>
-                                            <p className='truncate text-sm font-medium text-white/90'>
+                                            <p className='truncate text-sm font-medium text-slate-800 dark:text-white/90'>
                                                 {item.prompt || t('history.noPrompt')}
                                             </p>
-                                            <p className='mt-0.5 truncate text-[11px] text-white/45'>{generatedDate}</p>
+                                            <p className='mt-0.5 truncate text-[11px] text-slate-500 dark:text-white/45'>{generatedDate}</p>
                                         </button>
                                         {cost !== undefined && (
                                             <span className='shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-transparent dark:bg-green-600/15 dark:text-green-300'>
@@ -262,13 +266,13 @@ function HistoryPanelImpl({
                                         )}
                                     </div>
 
-                                    <div className='mt-2 grid grid-cols-[repeat(auto-fill,minmax(54px,1fr))] gap-1.5'>
+                                    <div className='mt-2 grid grid-cols-[repeat(auto-fill,56px)] gap-1.5'>
                                         {imagePreviews.map((imageInfo) => (
                                             <button
                                                 key={imageInfo.filename}
                                                 type='button'
                                                 onClick={() => onSelectImage(item, imageInfo.index)}
-                                                className='relative aspect-square overflow-hidden rounded-md border border-white/15 bg-neutral-900 focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-black focus:outline-none'
+                                                className='relative h-14 w-14 overflow-hidden rounded-md border border-slate-200 bg-slate-100 focus:ring-2 focus:ring-[#2563eb] focus:ring-offset-2 focus:ring-offset-white focus:outline-none dark:border-white/15 dark:bg-neutral-900 dark:focus:ring-white dark:focus:ring-offset-black'
                                                 aria-label={t('history.viewImageAria', {
                                                     filename: imageInfo.filename
                                                 })}>
@@ -284,7 +288,7 @@ function HistoryPanelImpl({
                                                         unoptimized
                                                     />
                                                 ) : (
-                                                    <div className='flex h-full w-full items-center justify-center bg-neutral-800 text-neutral-500'>
+                                                    <div className='flex h-full w-full items-center justify-center bg-slate-100 text-slate-400 dark:bg-neutral-800 dark:text-neutral-500'>
                                                         ?
                                                     </div>
                                                 )}
@@ -311,21 +315,21 @@ function HistoryPanelImpl({
                                         ))}
                                     </div>
 
-                                    <div className='mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-white/50'>
-                                        <span className='flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5'>
+                                    <div className='mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-white/50'>
+                                        <span className='flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             <Layers size={11} />
                                             {imageCount}
                                         </span>
-                                        <span className='rounded border border-white/10 px-1.5 py-0.5'>
+                                        <span className='rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             {formatDuration(item.durationMs)}
                                         </span>
-                                        <span className='rounded border border-white/10 px-1.5 py-0.5'>
+                                        <span className='rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             {item.size || '-'}
                                         </span>
-                                        <span className='rounded border border-white/10 px-1.5 py-0.5'>
+                                        <span className='rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             {formatOptionLabel(item.quality, t)}
                                         </span>
-                                        <span className='flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5'>
+                                        <span className='flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             {originalStorageMode === 'fs' ? (
                                                 <HardDrive size={11} />
                                             ) : (
@@ -335,7 +339,7 @@ function HistoryPanelImpl({
                                                 ? t('history.storageFile')
                                                 : t('history.storageDb')}
                                         </span>
-                                        <span className='flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5'>
+                                        <span className='flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             <FileImage size={11} />
                                             {outputFormat.toUpperCase()}
                                         </span>
@@ -360,7 +364,7 @@ function HistoryPanelImpl({
                                             asChild
                                             variant='outline'
                                             size='sm'
-                                            className='h-7 flex-1 border-white/20 px-2 py-1 text-xs text-white/70 hover:bg-white/10 hover:text-white'>
+                                            className='h-7 flex-1 border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 hover:text-slate-900 dark:border-white/20 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white'>
                                             <a href={detailHref}>{t('history.showDetails')}</a>
                                         </Button>
                                         {firstPreview?.src && firstImage && (
@@ -368,7 +372,7 @@ function HistoryPanelImpl({
                                                 asChild
                                                 variant='ghost'
                                                 size='icon'
-                                                className='h-7 w-7 rounded-md text-white/70 hover:bg-white/10 hover:text-white'>
+                                                className='h-7 w-7 rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white'>
                                                 <a
                                                     href={firstPreview.src}
                                                     download={firstImage.filename}

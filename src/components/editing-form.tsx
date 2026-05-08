@@ -1,13 +1,11 @@
 'use client';
 
-import { ModeToggle } from '@/components/mode-toggle';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
-import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { GptImageModel } from '@/lib/cost-utils';
 import { formatSizeValidationReason, useI18n } from '@/lib/i18n';
@@ -28,8 +26,6 @@ import {
     X,
     ScanEye,
     UploadCloud,
-    Lock,
-    LockOpen,
     SquareDashed
 } from 'lucide-react';
 import Image from 'next/image';
@@ -56,8 +52,7 @@ export type EditingFormData = {
 type EditingFormProps = {
     onSubmit: (data: EditingFormData) => void;
     isLoading: boolean;
-    currentMode: 'generate' | 'edit';
-    onModeChange: (mode: 'generate' | 'edit') => void;
+    hideSubmit?: boolean;
     isPasswordRequiredByBackend: boolean | null;
     clientPasswordHash: string | null;
     onOpenPasswordDialog: () => void;
@@ -110,23 +105,26 @@ const RadioItemWithIcon = ({
         <RadioGroupItem
             value={value}
             id={id}
-            className='border-white/40 text-white data-[state=checked]:border-white data-[state=checked]:text-white'
+            className='border-slate-300 text-[#2563eb] data-[state=checked]:border-[#2563eb] data-[state=checked]:text-[#2563eb] dark:border-white/40 dark:text-white dark:data-[state=checked]:border-white dark:data-[state=checked]:text-white'
         />
-        <Label htmlFor={id} className='flex cursor-pointer items-center gap-2 text-base text-white/80'>
-            <Icon className='h-5 w-5 text-white/60' />
+        <Label htmlFor={id} className='flex cursor-pointer items-center gap-1.5 text-[12px] text-slate-700 dark:text-white/80'>
+            <Icon className='h-4 w-4 text-slate-400 dark:text-white/60' />
             {label}
         </Label>
     </div>
 );
 
+const fieldLabelClass = 'text-[12px] font-medium text-slate-700 dark:text-white/85';
+const fieldHintClass = 'text-[12px] text-slate-500 dark:text-white/50';
+const controlSurfaceClass =
+    'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/20 dark:bg-white/[0.03] dark:text-white/80 dark:hover:bg-white/10 dark:hover:text-white';
+const sliderClass =
+    'mt-2 [&>button]:border-[#2563eb] [&>button]:bg-[#2563eb] [&>button]:ring-offset-white dark:[&>button]:border-white/20 dark:[&>button]:bg-white dark:[&>button]:ring-offset-[#0f1115] [&>span:first-child]:h-1 [&>span:first-child>span]:bg-[#2563eb] dark:[&>span:first-child>span]:bg-white';
+
 export function EditingForm({
     onSubmit,
     isLoading,
-    currentMode,
-    onModeChange,
-    isPasswordRequiredByBackend,
-    clientPasswordHash,
-    onOpenPasswordDialog,
+    hideSubmit = false,
     editModel,
     imageFiles,
     sourceImagePreviewUrls,
@@ -134,7 +132,6 @@ export function EditingForm({
     setSourceImagePreviewUrls,
     maxImages,
     editPrompt,
-    setEditPrompt,
     editN,
     setEditN,
     editSize,
@@ -493,50 +490,16 @@ export function EditingForm({
             : null;
 
     return (
-        <Card className='flex h-full w-full flex-col overflow-hidden rounded-lg border border-white/10 bg-black'>
-            <CardHeader className='flex items-start justify-between border-b border-white/10 pb-4'>
-                <div>
-                    <div className='flex items-center'>
-                        <CardTitle className='py-1 text-lg font-medium text-white'>{t('form.edit.title')}</CardTitle>
-                        {isPasswordRequiredByBackend && (
-                            <Button
-                                variant='ghost'
-                                size='icon'
-                                onClick={onOpenPasswordDialog}
-                                className='ml-2 text-white/60 hover:text-white'
-                                aria-label={t('page.configurePassword')}>
-                                {clientPasswordHash ? <Lock className='h-4 w-4' /> : <LockOpen className='h-4 w-4' />}
-                            </Button>
-                        )}
-                    </div>
-                    <CardDescription className='mt-1 text-white/60'>{t('form.edit.description')}</CardDescription>
-                </div>
-                <ModeToggle currentMode={currentMode} onModeChange={onModeChange} />
-            </CardHeader>
+        <Card className='flex h-full w-full flex-col overflow-hidden rounded-none border-0 bg-transparent shadow-none'>
             <form onSubmit={handleSubmit} className='flex h-full flex-1 flex-col overflow-hidden'>
-                <CardContent className='flex-1 space-y-5 overflow-y-auto p-4'>
-                    <div className='space-y-1.5'>
-                        <Label htmlFor='edit-prompt' className='text-white'>
-                            {t('common.prompt')}
-                        </Label>
-                        <Textarea
-                            id='edit-prompt'
-                            placeholder={t('form.edit.promptPlaceholder')}
-                            value={editPrompt}
-                            onChange={(e) => setEditPrompt(e.target.value)}
-                            required
-                            disabled={isLoading}
-                            className='min-h-[80px] rounded-md border border-white/20 bg-black text-white placeholder:text-white/40 focus:border-white/50 focus:ring-white/50'
-                        />
-                    </div>
-
+                <CardContent className='min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-0 pr-1'>
                     <div className='space-y-2'>
-                        <Label className='text-white'>{t('form.sourceImages', { maxImages })}</Label>
+                        <Label className={fieldLabelClass}>{t('form.sourceImages', { maxImages })}</Label>
                         <Label
                             htmlFor='image-files-input'
-                            className='flex h-10 w-full cursor-pointer items-center justify-between rounded-md border border-white/20 bg-black px-3 py-2 text-sm transition-colors hover:bg-white/5'>
-                            <span className='truncate pr-2 text-white/60'>{displayFileNames(imageFiles)}</span>
-                            <span className='flex shrink-0 items-center gap-1.5 rounded-md bg-white/10 px-3 py-1 text-xs font-medium text-white/80 hover:bg-white/20'>
+                            className={`flex h-9 w-full cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[12px] transition-colors ${controlSurfaceClass}`}>
+                            <span className='truncate pr-2 text-slate-500 dark:text-white/60'>{displayFileNames(imageFiles)}</span>
+                            <span className='flex shrink-0 items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-white dark:border-white/10 dark:bg-white/10 dark:text-white/80 dark:hover:bg-white/20'>
                                 <Upload className='h-3 w-3' /> {t('form.browse')}
                             </span>
                         </Label>
@@ -558,7 +521,7 @@ export function EditingForm({
                                             alt={t('form.sourcePreviewAlt', { index: index + 1 })}
                                             width={80}
                                             height={80}
-                                            className='rounded border border-white/10 object-cover'
+                                            className='rounded border border-slate-200 object-cover dark:border-white/10'
                                             unoptimized
                                         />
                                         <Button
@@ -577,14 +540,14 @@ export function EditingForm({
                     </div>
 
                     <div className='space-y-3'>
-                        <Label className='block text-white'>{t('common.mask')}</Label>
+                        <Label className={fieldLabelClass}>{t('common.mask')}</Label>
                         <Button
                             type='button'
                             variant='outline'
                             size='sm'
                             onClick={() => setEditShowMaskEditor(!editShowMaskEditor)}
                             disabled={isLoading || !editOriginalImageSize}
-                            className='w-full justify-start border-white/20 px-3 text-white/80 hover:bg-white/10 hover:text-white'>
+                            className={`w-full justify-start px-3 text-[12px] ${controlSurfaceClass}`}>
                             {editShowMaskEditor
                                 ? t('form.maskCloseEditor')
                                 : editGeneratedMaskFile
@@ -597,10 +560,17 @@ export function EditingForm({
                         </Button>
 
                         {editShowMaskEditor && firstImagePreviewUrl && editOriginalImageSize && (
-                            <div className='space-y-3 rounded-md border border-white/20 bg-black p-3'>
-                                <p className='text-xs text-white/60'>{t('form.maskDescription')}</p>
+                            <div
+                                className='space-y-3 rounded-md border border-slate-200 bg-slate-50 p-3 overscroll-contain dark:border-white/20 dark:bg-black'
+                                onWheel={(event) => event.stopPropagation()}
+                                onTouchMove={(event) => {
+                                    if (isDrawing.current) {
+                                        event.stopPropagation();
+                                    }
+                                }}>
+                                <p className={fieldHintClass}>{t('form.maskDescription')}</p>
                                 <div
-                                    className='relative mx-auto w-full overflow-hidden rounded border border-white/10'
+                                    className='relative mx-auto w-full overflow-hidden rounded border border-slate-200 dark:border-white/10'
                                     style={{
                                         maxWidth: `min(100%, ${editOriginalImageSize.width}px)`,
                                         aspectRatio: `${editOriginalImageSize.width} / ${editOriginalImageSize.height}`
@@ -617,7 +587,7 @@ export function EditingForm({
                                         ref={canvasRef}
                                         width={editOriginalImageSize.width}
                                         height={editOriginalImageSize.height}
-                                        className='absolute top-0 left-0 h-full w-full cursor-crosshair'
+                                        className='absolute top-0 left-0 h-full w-full touch-none cursor-crosshair select-none'
                                         onMouseDown={startDrawing}
                                         onMouseMove={drawLine}
                                         onMouseUp={stopDrawing}
@@ -629,7 +599,7 @@ export function EditingForm({
                                 </div>
                                 <div className='grid grid-cols-1 gap-4 pt-2'>
                                     <div className='space-y-2'>
-                                        <Label htmlFor='brush-size-slider' className='text-sm text-white'>
+                                        <Label htmlFor='brush-size-slider' className={fieldLabelClass}>
                                             {t('form.brushSize', { size: editBrushSize[0] })}
                                         </Label>
                                         <Slider
@@ -640,7 +610,7 @@ export function EditingForm({
                                             value={editBrushSize}
                                             onValueChange={setEditBrushSize}
                                             disabled={isLoading}
-                                            className='mt-1 [&>button]:border-black [&>button]:bg-white [&>button]:ring-offset-black [&>span:first-child]:h-1 [&>span:first-child>span]:bg-white'
+                                            className={sliderClass}
                                         />
                                     </div>
                                 </div>
@@ -651,7 +621,7 @@ export function EditingForm({
                                         size='sm'
                                         onClick={() => maskInputRef.current?.click()}
                                         disabled={isLoading || !editOriginalImageSize}
-                                        className='mr-auto border-white/20 text-white/80 hover:bg-white/10 hover:text-white'>
+                                        className={`mr-auto text-[12px] ${controlSurfaceClass}`}>
                                         <UploadCloud className='mr-1.5 h-4 w-4' /> {t('form.maskUpload')}
                                     </Button>
                                     <Input
@@ -669,7 +639,7 @@ export function EditingForm({
                                             size='sm'
                                             onClick={handleClearMask}
                                             disabled={isLoading}
-                                            className='border-white/20 text-white/80 hover:bg-white/10 hover:text-white'>
+                                            className={`text-[12px] ${controlSurfaceClass}`}>
                                             <Eraser className='mr-1.5 h-4 w-4' /> {t('form.maskClear')}
                                         </Button>
                                         <Button
@@ -678,14 +648,14 @@ export function EditingForm({
                                             size='sm'
                                             onClick={generateAndSaveMask}
                                             disabled={isLoading || editDrawnPoints.length === 0}
-                                            className='bg-white text-black hover:bg-white/90 disabled:opacity-50'>
+                                            className='bg-[#2563eb] text-[#ffffff] hover:bg-[#1d4ed8] disabled:opacity-50 dark:bg-white dark:text-[#0f172a] dark:hover:bg-white/90'>
                                             <Save className='mr-1.5 h-4 w-4' /> {t('form.maskSave')}
                                         </Button>
                                     </div>
                                 </div>
                                 {editMaskPreviewUrl && (
-                                    <div className='mt-3 border-t border-white/10 pt-3 text-center'>
-                                        <Label className='mb-1.5 block text-sm text-white'>
+                                    <div className='mt-3 border-t border-slate-200 pt-3 text-center dark:border-white/10'>
+                                        <Label className={fieldLabelClass}>
                                             {t('form.maskPreviewLabel')}
                                         </Label>
                                         <div className='inline-block rounded border border-gray-300 bg-white p-1'>
@@ -720,13 +690,29 @@ export function EditingForm({
                         )}
                     </div>
 
+                    <div className='space-y-2'>
+                        <Label htmlFor='edit-n-slider' className={fieldLabelClass}>
+                            {t('form.numberOfImages', { count: editN[0] })}
+                        </Label>
+                        <Slider
+                            id='edit-n-slider'
+                            min={1}
+                            max={10}
+                            step={1}
+                            value={editN}
+                            onValueChange={setEditN}
+                            disabled={isLoading}
+                            className={sliderClass}
+                        />
+                    </div>
+
                     <div className='space-y-3'>
-                        <Label className='block text-white'>{t('common.size')}</Label>
+                        <Label className={fieldLabelClass}>{t('common.size')}</Label>
                         <RadioGroup
                             value={editSize}
                             onValueChange={(value) => setEditSize(value as EditingFormData['size'])}
                             disabled={isLoading}
-                            className='flex flex-wrap gap-x-5 gap-y-3'>
+                            className='grid grid-cols-2 gap-2'>
                             <Tooltip>
                                 <TooltipTrigger asChild>
                                     <div>
@@ -776,10 +762,10 @@ export function EditingForm({
                             )}
                         </RadioGroup>
                         {supportsCustomSize && editSize === 'custom' && (
-                            <div className='space-y-2 rounded-md border border-white/10 bg-white/5 p-3'>
+                            <div className='space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/5'>
                                 <div className='flex items-center gap-3'>
                                     <div className='flex-1 space-y-1'>
-                                        <Label htmlFor='edit-custom-width' className='text-xs text-white/70'>
+                                        <Label htmlFor='edit-custom-width' className='text-xs text-slate-500 dark:text-white/70'>
                                             {t('common.width')}
                                         </Label>
                                         <Input
@@ -791,12 +777,12 @@ export function EditingForm({
                                             value={editCustomWidth}
                                             onChange={(e) => setEditCustomWidth(parseInt(e.target.value, 10) || 0)}
                                             disabled={isLoading}
-                                            className='rounded-md border border-white/20 bg-black text-white focus:border-white/50 focus:ring-white/50'
+                                            className='rounded-md border border-slate-200 bg-white text-slate-900 focus:border-[#2563eb] focus:ring-[#2563eb]/30 dark:border-white/20 dark:bg-black dark:text-white dark:focus:border-white/50 dark:focus:ring-white/50'
                                         />
                                     </div>
-                                    <span className='pt-5 text-white/60'>×</span>
+                                    <span className='pt-5 text-slate-400 dark:text-white/60'>×</span>
                                     <div className='flex-1 space-y-1'>
-                                        <Label htmlFor='edit-custom-height' className='text-xs text-white/70'>
+                                        <Label htmlFor='edit-custom-height' className='text-xs text-slate-500 dark:text-white/70'>
                                             {t('common.height')}
                                         </Label>
                                         <Input
@@ -808,11 +794,11 @@ export function EditingForm({
                                             value={editCustomHeight}
                                             onChange={(e) => setEditCustomHeight(parseInt(e.target.value, 10) || 0)}
                                             disabled={isLoading}
-                                            className='rounded-md border border-white/20 bg-black text-white focus:border-white/50 focus:ring-white/50'
+                                            className='rounded-md border border-slate-200 bg-white text-slate-900 focus:border-[#2563eb] focus:ring-[#2563eb]/30 dark:border-white/20 dark:bg-black dark:text-white dark:focus:border-white/50 dark:focus:ring-white/50'
                                         />
                                     </div>
                                 </div>
-                                <p className='text-xs text-white/50'>
+                                <p className={fieldHintClass}>
                                     {customRatio
                                         ? t('form.customSizeSummary', {
                                               pixels: customPixelCount.toLocaleString(),
@@ -829,21 +815,21 @@ export function EditingForm({
                                         {formatSizeValidationReason(customSizeValidation.reason, t)}
                                     </p>
                                 )}
-                                <p className='text-xs text-white/40'>{t('form.customSizeConstraints')}</p>
+                                <p className='text-xs text-slate-400 dark:text-white/40'>{t('form.customSizeConstraints')}</p>
                             </div>
                         )}
                     </div>
 
                     <div className='space-y-3'>
                         <div>
-                            <Label className='block text-white'>{t('common.quality')}</Label>
-                            <p className='mt-1 text-xs text-white/50'>{t('form.qualityDescription')}</p>
+                            <Label className={fieldLabelClass}>{t('common.quality')}</Label>
+                            <p className={fieldHintClass}>{t('form.qualityDescription')}</p>
                         </div>
                         <RadioGroup
                             value={editQuality}
                             onValueChange={(value) => setEditQuality(value as EditingFormData['quality'])}
                             disabled={isLoading}
-                            className='flex flex-wrap gap-x-5 gap-y-3'>
+                            className='grid grid-cols-2 gap-2'>
                             <RadioItemWithIcon
                                 value='auto'
                                 id='edit-quality-auto'
@@ -871,35 +857,22 @@ export function EditingForm({
                         </RadioGroup>
                     </div>
 
-                    <div className='space-y-2'>
-                        <Label htmlFor='edit-n-slider' className='text-white'>
-                            {t('form.numberOfImages', { count: editN[0] })}
-                        </Label>
-                        <Slider
-                            id='edit-n-slider'
-                            min={1}
-                            max={10}
-                            step={1}
-                            value={editN}
-                            onValueChange={setEditN}
-                            disabled={isLoading}
-                            className='mt-3 [&>button]:border-black [&>button]:bg-white [&>button]:ring-offset-black [&>span:first-child]:h-1 [&>span:first-child>span]:bg-white'
-                        />
-                    </div>
                 </CardContent>
-                <CardFooter className='border-t border-white/10 p-4'>
-                    <Button
-                        type='submit'
-                        disabled={isLoading || !editPrompt || imageFiles.length === 0 || customSizeInvalid}
-                        translate='no'
-                        className='flex w-full items-center justify-center gap-2 rounded-md bg-white text-black hover:bg-white/90 disabled:bg-white/10 disabled:text-white/40'>
-                        <Loader2
-                            aria-hidden='true'
-                            className={`h-4 w-4 ${isLoading ? 'animate-spin opacity-100' : 'hidden opacity-0'}`}
-                        />
-                        <span>{isLoading ? t('form.edit.buttonLoading') : t('form.edit.button')}</span>
-                    </Button>
-                </CardFooter>
+                {!hideSubmit && (
+                    <CardFooter className='border-t border-slate-200 p-0 pt-3 dark:border-white/10'>
+                        <Button
+                            type='submit'
+                            disabled={isLoading || imageFiles.length === 0 || customSizeInvalid}
+                            translate='no'
+                            className='flex w-full items-center justify-center gap-2 rounded-md bg-[#2563eb] text-[#ffffff] hover:bg-[#1d4ed8] disabled:bg-slate-200 disabled:text-slate-500 dark:bg-white dark:text-[#0f172a] dark:hover:bg-white/90 dark:disabled:bg-white/10 dark:disabled:text-white/40'>
+                            <Loader2
+                                aria-hidden='true'
+                                className={`h-4 w-4 ${isLoading ? 'animate-spin opacity-100' : 'hidden opacity-0'}`}
+                            />
+                            <span>{isLoading ? t('form.edit.buttonLoading') : t('form.edit.button')}</span>
+                        </Button>
+                    </CardFooter>
+                )}
             </form>
         </Card>
     );
