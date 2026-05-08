@@ -40,6 +40,7 @@ export default function HistoryPage() {
         skipDeleteConfirmation
     } = useHomeHistory<HistoryMetadata>(scopedHistoryUserId);
     const [error, setError] = React.useState<string | null>(null);
+    const [serverHistory, setServerHistory] = React.useState<HistoryMetadata[]>([]);
     const [itemToDeleteConfirm, setItemToDeleteConfirm] = React.useState<HistoryMetadata | null>(null);
     const [dialogCheckboxStateSkipConfirm, setDialogCheckboxStateSkipConfirm] = React.useState(false);
     const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
@@ -52,6 +53,134 @@ export default function HistoryPage() {
         [activeImageUserId]
     );
     const isImageCacheReady = allDbImages !== undefined;
+    const hasPendingHistory = history.some((item) => item.status === 'pending');
+
+    React.useEffect(() => {
+        if (effectiveStorageModeClient !== 'fs') {
+            setServerHistory([]);
+            return;
+        }
+
+        if (authMode === 'sub2api' && !isAuthReady) {
+            setServerHistory([]);
+            return;
+        }
+
+        if (authMode !== 'sub2api' && isPasswordRequiredByBackend && !clientPasswordHash) {
+            setServerHistory([]);
+            return;
+        }
+
+        const controller = new AbortController();
+
+        const loadServerHistory = async () => {
+            try {
+                const params = new URLSearchParams();
+                if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
+                    params.set('passwordHash', clientPasswordHash);
+                }
+
+                const pendingTimestamps = history
+                    .filter((item) => item.status === 'pending')
+                    .map((item) => item.timestamp);
+                params.set('page_size', hasPendingHistory ? '1000' : '100');
+                if (pendingTimestamps.length > 0) {
+                    params.set('since', Math.min(...pendingTimestamps).toString());
+                }
+
+                const response = await fetch(`/api/image-history${params.size ? `?${params.toString()}` : ''}`, {
+                    cache: 'no-store',
+                    signal: controller.signal
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to load server image history: ${response.status}`);
+                }
+
+                const result = (await response.json()) as {
+                    data?: { items?: HistoryMetadata[] };
+                    history?: HistoryMetadata[];
+                };
+                const loadedServerHistory = Array.isArray(result.data?.items)
+                    ? result.data.items
+                    : Array.isArray(result.history)
+                      ? result.history
+                      : [];
+                setServerHistory(loadedServerHistory);
+
+                if (hasPendingHistory) {
+                    const loadedServerHistoryByTimestamp = new Map(
+                        loadedServerHistory.map((item) => [item.timestamp, item])
+                    );
+                    setHistory((prevHistory) =>
+                        prevHistory.map((item) => {
+                            const serverItem = loadedServerHistoryByTimestamp.get(item.timestamp);
+                            if (item.status !== 'pending' || !serverItem || serverItem.images.length === 0) {
+                                return item;
+                            }
+
+                            return {
+                                ...item,
+                                images: serverItem.images,
+                                status: 'completed',
+                                durationMs: item.durationMs || serverItem.durationMs,
+                                output_format: item.output_format || serverItem.output_format,
+                                storageModeUsed: 'fs'
+                            };
+                        })
+                    );
+                }
+            } catch (loadError) {
+                if (loadError instanceof DOMException && loadError.name === 'AbortError') {
+                    return;
+                }
+
+                console.error('Failed to load server image history:', loadError);
+            }
+        };
+
+        loadServerHistory();
+        const intervalId = hasPendingHistory ? window.setInterval(loadServerHistory, 5000) : undefined;
+
+        return () => {
+            if (intervalId) window.clearInterval(intervalId);
+            controller.abort();
+        };
+    }, [authMode, clientPasswordHash, hasPendingHistory, history, isAuthReady, isPasswordRequiredByBackend, setHistory]);
+
+    const displayedHistory = React.useMemo(() => {
+        const serverHistoryByTimestamp = new Map(serverHistory.map((item) => [item.timestamp, item]));
+        const localFilenames = new Set(history.flatMap((item) => item.images.map((image) => image.filename)));
+        const mergedLocalHistory = history.map((item) => {
+            const serverItem = serverHistoryByTimestamp.get(item.timestamp);
+            if (!serverItem || serverItem.images.length === 0) {
+                return item;
+            }
+
+            if (item.images.length === 0 || item.status === 'pending') {
+                return {
+                    ...item,
+                    images: serverItem.images,
+                    status: 'completed' as const,
+                    durationMs: item.durationMs || serverItem.durationMs,
+                    output_format: item.output_format || serverItem.output_format,
+                    storageModeUsed: 'fs' as const
+                };
+            }
+
+            return item;
+        });
+        const localTimestamps = new Set(mergedLocalHistory.map((item) => item.timestamp));
+        const missingServerHistory = serverHistory
+            .filter((item) => !localTimestamps.has(item.timestamp))
+            .map((item) => ({
+                ...item,
+                images: item.images.filter((image) => !localFilenames.has(image.filename))
+            }))
+            .filter((item) => item.images.length > 0);
+
+        return [...mergedLocalHistory, ...missingServerHistory];
+    }, [history, serverHistory]);
 
     React.useEffect(() => {
         if (allDbImages === undefined) {
@@ -116,7 +245,12 @@ export default function HistoryPage() {
 
         if (!window.confirm(confirmationMessage)) return;
 
+        const filenamesToDelete = Array.from(
+            new Set(displayedHistory.flatMap((item) => item.images.map((image) => image.filename)))
+        );
+
         setHistory([]);
+        setServerHistory([]);
         setError(null);
 
         try {
@@ -124,6 +258,27 @@ export default function HistoryPage() {
             if (activeImageUserId !== undefined) {
                 await db.images.where('userId').equals(activeImageUserId).delete();
             }
+
+            if (effectiveStorageModeClient === 'fs' && filenamesToDelete.length > 0) {
+                const apiPayload: { filenames: string[]; passwordHash?: string } = {
+                    filenames: filenamesToDelete
+                };
+                if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
+                    apiPayload.passwordHash = clientPasswordHash;
+                }
+
+                const response = await fetch('/api/image-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(apiPayload)
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || t('page.deleteApiFailed', { status: response.status }));
+                }
+            }
+
             blobUrlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
             blobUrlCacheRef.current.clear();
             setImageSrcByFilename({});
@@ -131,7 +286,16 @@ export default function HistoryPage() {
             console.error('Failed during history clearing:', e);
             setError(t('page.clearHistoryError', { message: e instanceof Error ? e.message : String(e) }));
         }
-    }, [activeImageUserId, clearStoredHistory, setHistory, t]);
+    }, [
+        activeImageUserId,
+        authMode,
+        clearStoredHistory,
+        clientPasswordHash,
+        displayedHistory,
+        isPasswordRequiredByBackend,
+        setHistory,
+        t
+    ]);
 
     const executeDeleteItem = React.useCallback(
         async (item: HistoryMetadata) => {
@@ -182,6 +346,7 @@ export default function HistoryPage() {
                 }
 
                 setHistory((prevHistory) => prevHistory.filter((historyItem) => historyItem.timestamp !== timestamp));
+                setServerHistory((prevHistory) => prevHistory.filter((historyItem) => historyItem.timestamp !== timestamp));
             } catch (e: unknown) {
                 console.error('Error during item deletion:', e);
                 setError(e instanceof Error ? e.message : t('page.unexpectedDeleteError'));
@@ -241,7 +406,7 @@ export default function HistoryPage() {
 
                 <div className='min-h-0 flex-1 overflow-hidden p-2 lg:p-4'>
                     <HistoryPanel
-                        history={history}
+                        history={displayedHistory}
                         onSelectImage={handleSelectImage}
                         onClearHistory={handleClearHistory}
                         getImageSrc={getImageSrc}

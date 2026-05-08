@@ -35,6 +35,8 @@ type HistoryImage = {
 export type HistoryMetadata = {
     timestamp: number;
     images: HistoryImage[];
+    status?: 'pending' | 'completed' | 'error';
+    errorMessage?: string;
     storageModeUsed?: 'fs' | 'indexeddb';
     durationMs: number;
     quality: GenerationFormData['quality'];
@@ -161,11 +163,12 @@ export default function HomePage() {
     } = useHomeAuth();
     const scopedHistoryUserId = authMode === 'sub2api' ? (image2User?.id ?? null) : undefined;
     const activeImageUserId = authMode === 'sub2api' ? image2User?.id : LEGACY_IMAGE_USER_ID;
-    const { setHistory } = useHomeHistory<HistoryMetadata>(scopedHistoryUserId);
+    const { history, setHistory } = useHomeHistory<HistoryMetadata>(scopedHistoryUserId);
     const [isThemeMounted, setIsThemeMounted] = React.useState(false);
     const [mode, setMode] = React.useState<'generate' | 'edit'>('generate');
     const [showApiKey, setShowApiKey] = React.useState(false);
     const [isLoading, setIsLoading] = React.useState(false);
+    const isLoadingRef = React.useRef(false);
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
@@ -230,6 +233,11 @@ export default function HomePage() {
         saveSettings,
         settings
     });
+
+    React.useEffect(() => {
+        isLoadingRef.current = isLoading;
+    }, [isLoading]);
+
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
     const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('square');
@@ -447,7 +455,7 @@ export default function HomePage() {
         return 'image/png';
     };
 
-    const cacheApiImageForDisplay = async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
+    const cacheApiImageForDisplay = React.useCallback(async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
         if (img.b64_json) {
             try {
                 const byteCharacters = atob(img.b64_json);
@@ -495,11 +503,198 @@ export default function HomePage() {
         }
 
         return null;
-    };
+    }, [activeImageUserId, normalizeRevisedPrompt, t]);
+
+    const getOutputFormatFromFilename = React.useCallback((filename: string): GenerationFormData['output_format'] => {
+        const extension = filename.split('.').pop()?.toLowerCase();
+        if (extension === 'jpg' || extension === 'jpeg') return 'jpeg';
+        if (extension === 'webp') return 'webp';
+        return 'png';
+    }, []);
+
+    React.useEffect(() => {
+        if (effectiveStorageModeClient !== 'fs' || isLoadingRef.current || latestImageBatch) {
+            return;
+        }
+
+        if (authMode === 'sub2api' && !isAuthReady) {
+            return;
+        }
+
+        if (authMode !== 'sub2api' && isPasswordRequiredByBackend && !clientPasswordHash) {
+            return;
+        }
+
+        const latestHistoryEntry = [...history].sort((left, right) => right.timestamp - left.timestamp)[0];
+        if (!latestHistoryEntry) {
+            return;
+        }
+
+        const toApiImages = (item: HistoryMetadata): ApiImageResponseItem[] =>
+            item.images.map((image) => ({
+                filename: image.filename,
+                output_format: item.output_format || getOutputFormatFromFilename(image.filename),
+                path: `/api/image/${image.filename}`,
+                ...(image.revisedPrompt ? { revised_prompt: image.revisedPrompt } : {})
+            }));
+
+        const restoreCompletedEntry = async (item: HistoryMetadata) => {
+            const processedImages = (await Promise.all(toApiImages(item).map(cacheApiImageForDisplay))).filter(
+                Boolean
+            ) as ImageBatchItem[];
+
+            if (processedImages.length === 0) {
+                return;
+            }
+
+            setMode(item.mode);
+            setLatestImageBatch(processedImages);
+            setLatestBatchPrompt(item.prompt);
+            setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
+            setApiResponseInfo({
+                status: 'success',
+                endpoint: '/api/images',
+                method: 'POST',
+                startedAt: item.timestamp,
+                durationMs: item.durationMs,
+                mode: item.mode,
+                model: item.model || selectedModel,
+                size: item.size || '',
+                n: item.images.length,
+                stream: !!item.streaming,
+                partialImages: item.partialImages,
+                storageMode: effectiveStorageModeClient,
+                imageCount: item.images.length,
+                filenames: item.images.map((image) => image.filename),
+                costUsd: item.costDetails?.estimated_cost_usd,
+                streamingStats: item.streaming
+                    ? {
+                          partialImages: item.partialImages ?? 0,
+                          completedImages: item.images.length,
+                          doneReceived: true
+                      }
+                    : undefined
+            });
+        };
+
+        if (latestHistoryEntry.images.length > 0 && latestHistoryEntry.status !== 'pending') {
+            restoreCompletedEntry(latestHistoryEntry);
+            return;
+        }
+
+        if (latestHistoryEntry.status !== 'pending') {
+            return;
+        }
+
+        const controller = new AbortController();
+        setMode(latestHistoryEntry.mode);
+        setIsLoading(true);
+        setActiveRequestStartedAt(latestHistoryEntry.timestamp);
+        setElapsedSeconds(Math.max(0, Math.floor((Date.now() - latestHistoryEntry.timestamp) / 1000)));
+        setLatestBatchPrompt(latestHistoryEntry.prompt);
+        setImageOutputView('grid');
+        setApiResponseInfo({
+            status: 'loading',
+            endpoint: '/api/images',
+            method: 'POST',
+            startedAt: latestHistoryEntry.timestamp,
+            mode: latestHistoryEntry.mode,
+            model: latestHistoryEntry.model || selectedModel,
+            size: latestHistoryEntry.size || '',
+            n: latestHistoryEntry.images.length || 1,
+            stream: !!latestHistoryEntry.streaming,
+            partialImages: latestHistoryEntry.partialImages,
+            storageMode: effectiveStorageModeClient,
+            streamingStats: latestHistoryEntry.streaming
+                ? {
+                      partialImages: 0,
+                      completedImages: 0,
+                      doneReceived: false
+                  }
+                : undefined
+        });
+
+        const loadServerCompletion = async () => {
+            try {
+                const params = new URLSearchParams();
+                if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
+                    params.set('passwordHash', clientPasswordHash);
+                }
+                params.set('since', latestHistoryEntry.timestamp.toString());
+                params.set('page_size', '1000');
+
+                const response = await fetch(`/api/image-history${params.size ? `?${params.toString()}` : ''}`, {
+                    cache: 'no-store',
+                    signal: controller.signal
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to load server image history: ${response.status}`);
+                }
+
+                const result = (await response.json()) as {
+                    data?: { items?: HistoryMetadata[] };
+                    history?: HistoryMetadata[];
+                };
+                const serverHistory = Array.isArray(result.data?.items)
+                    ? result.data.items
+                    : Array.isArray(result.history)
+                      ? result.history
+                      : [];
+                const serverItem = serverHistory.find((item) => item.timestamp === latestHistoryEntry.timestamp);
+
+                if (!serverItem || serverItem.images.length === 0) {
+                    return;
+                }
+
+                const completedEntry: HistoryMetadata = {
+                    ...latestHistoryEntry,
+                    images: serverItem.images,
+                    status: 'completed',
+                    durationMs: latestHistoryEntry.durationMs || serverItem.durationMs,
+                    output_format: latestHistoryEntry.output_format || serverItem.output_format,
+                    storageModeUsed: 'fs'
+                };
+
+                setHistory((prevHistory) =>
+                    prevHistory.map((item) => (item.timestamp === completedEntry.timestamp ? completedEntry : item))
+                );
+                await restoreCompletedEntry(completedEntry);
+                setIsLoading(false);
+                setActiveRequestStartedAt(null);
+            } catch (loadError) {
+                if (loadError instanceof DOMException && loadError.name === 'AbortError') {
+                    return;
+                }
+
+                console.error('Failed to restore generated image on home page:', loadError);
+            }
+        };
+
+        loadServerCompletion();
+        const intervalId = window.setInterval(loadServerCompletion, 5000);
+
+        return () => {
+            window.clearInterval(intervalId);
+            controller.abort();
+        };
+    }, [
+        authMode,
+        cacheApiImageForDisplay,
+        clientPasswordHash,
+        getOutputFormatFromFilename,
+        history,
+        isAuthReady,
+        isPasswordRequiredByBackend,
+        latestImageBatch,
+        selectedModel,
+        setHistory
+    ]);
 
     const handleApiCall = async (formData: GenerationFormData | EditingFormData) => {
         const startTime = Date.now();
         let durationMs = 0;
+        let pendingHistoryEntry: HistoryMetadata | null = null;
 
         setIsLoading(true);
         setActiveRequestStartedAt(startTime);
@@ -542,11 +737,21 @@ export default function HomePage() {
         let requestPartialImages: number | undefined;
         let requestModel: GptImageModel = selectedModel;
         let requestImageCount = 1;
+        let requestPrompt = '';
+        let requestQuality: GenerationFormData['quality'] = 'auto';
+        let requestBackground: GenerationFormData['background'] = 'auto';
+        let requestModeration: GenerationFormData['moderation'] = 'auto';
+        let requestOutputFormat: GenerationFormData['output_format'] = 'png';
 
         if (mode === 'generate') {
             const genData = formData as GenerationFormData;
             requestModel = genData.model;
             requestImageCount = genData.n;
+            requestPrompt = genData.prompt;
+            requestQuality = genData.quality;
+            requestBackground = genData.background;
+            requestModeration = genData.moderation;
+            requestOutputFormat = genData.output_format;
             apiFormData.append('model', requestModel);
             apiFormData.append('prompt', genData.prompt);
             apiFormData.append('n', genData.n.toString());
@@ -584,6 +789,9 @@ export default function HomePage() {
             }
             requestModel = editData.model;
             requestImageCount = editData.n;
+            requestPrompt = editData.prompt;
+            requestQuality = editData.quality;
+            requestOutputFormat = 'png';
             apiFormData.append('model', requestModel);
             apiFormData.append('prompt', editData.prompt);
             apiFormData.append('n', editData.n.toString());
@@ -605,6 +813,8 @@ export default function HomePage() {
             }
         }
 
+        apiFormData.append('history_timestamp', startTime.toString());
+
         setApiResponseInfo({
             status: 'loading',
             endpoint: '/api/images',
@@ -625,6 +835,32 @@ export default function HomePage() {
                   }
                 : undefined
         });
+
+        pendingHistoryEntry = {
+            timestamp: startTime,
+            images: [],
+            status: 'pending',
+            storageModeUsed: effectiveStorageModeClient,
+            durationMs: 0,
+            quality: requestQuality,
+            background: requestBackground,
+            moderation: requestModeration,
+            output_format: requestOutputFormat,
+            prompt: requestPrompt,
+            mode,
+            costDetails: null,
+            model: requestModel,
+            size: requestSize,
+            output_compression: requestOutputCompression,
+            streaming: requestStreaming,
+            partialImages: requestPartialImages,
+            sourceImageCount: requestSourceImageCount,
+            hasMask: requestHasMask
+        };
+        setHistory((prevHistory) => [
+            pendingHistoryEntry as HistoryMetadata,
+            ...prevHistory.filter((historyItem) => historyItem.timestamp !== startTime)
+        ]);
 
         try {
             const response = await fetch('/api/images', {
@@ -766,7 +1002,7 @@ export default function HomePage() {
                             : current
                     );
 
-                    const batchTimestamp = Date.now();
+                    const batchTimestamp = startTime;
                     const newHistoryEntry: HistoryMetadata = {
                         timestamp: batchTimestamp,
                         images: finalImages.map((img) => ({
@@ -775,6 +1011,7 @@ export default function HomePage() {
                                 ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
                                 : {})
                         })),
+                        status: 'completed',
                         storageModeUsed: effectiveStorageModeClient,
                         durationMs: durationMs,
                         quality: historyQuality,
@@ -805,7 +1042,10 @@ export default function HomePage() {
                     setLatestImageBatch(processedImages);
                     setLatestBatchPrompt(historyPrompt);
                     setImageOutputView(0);
-                    setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
+                    setHistory((prevHistory) => [
+                        newHistoryEntry,
+                        ...prevHistory.filter((historyItem) => historyItem.timestamp !== batchTimestamp)
+                    ]);
                     hasSavedStreamingHistory = true;
                 };
 
@@ -947,7 +1187,7 @@ export default function HomePage() {
                         : current
                 );
 
-                const batchTimestamp = Date.now();
+                const batchTimestamp = startTime;
                 const newHistoryEntry: HistoryMetadata = {
                     timestamp: batchTimestamp,
                     images: result.images.map((img) => ({
@@ -956,6 +1196,7 @@ export default function HomePage() {
                             ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
                             : {})
                     })),
+                    status: 'completed',
                     storageModeUsed: effectiveStorageModeClient,
                     durationMs: durationMs,
                     quality: historyQuality,
@@ -985,7 +1226,10 @@ export default function HomePage() {
                 setLatestBatchPrompt(historyPrompt);
                 setImageOutputView(processedImages.length > 0 ? 0 : 'grid');
 
-                setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
+                setHistory((prevHistory) => [
+                    newHistoryEntry,
+                    ...prevHistory.filter((historyItem) => historyItem.timestamp !== batchTimestamp)
+                ]);
             } else {
                 setLatestImageBatch(null);
                 setLatestBatchPrompt('');
@@ -1006,6 +1250,20 @@ export default function HomePage() {
                       }
                     : current
             );
+            if (pendingHistoryEntry) {
+                setHistory((prevHistory) =>
+                    prevHistory.map((historyItem) =>
+                        historyItem.timestamp === pendingHistoryEntry?.timestamp
+                            ? {
+                                  ...historyItem,
+                                  status: 'error',
+                                  errorMessage,
+                                  durationMs
+                              }
+                            : historyItem
+                    )
+                );
+            }
             setLatestImageBatch(null);
             setLatestBatchPrompt('');
         } finally {

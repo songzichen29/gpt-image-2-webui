@@ -223,6 +223,8 @@ function HistoryPanelImpl({
                         {orderedHistory.map((item) => {
                             const firstImage = item.images?.[0];
                             const imageCount = item.images?.length ?? 0;
+                            const isPending = item.status === 'pending';
+                            const isError = item.status === 'error';
                             const itemKey = item.timestamp;
                             const originalStorageMode = item.storageModeUsed || 'fs';
                             const outputFormat = item.output_format || 'png';
@@ -259,6 +261,16 @@ function HistoryPanelImpl({
                                             </p>
                                             <p className='mt-0.5 truncate text-[11px] text-slate-500 dark:text-white/45'>{generatedDate}</p>
                                         </button>
+                                        {isPending && (
+                                            <span className='shrink-0 rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 dark:border-blue-400/30 dark:bg-blue-500/10 dark:text-blue-200'>
+                                                {t('history.statusPending')}
+                                            </span>
+                                        )}
+                                        {isError && (
+                                            <span className='shrink-0 rounded-full border border-red-200 bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-700 dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-200'>
+                                                {t('history.statusError')}
+                                            </span>
+                                        )}
                                         {cost !== undefined && (
                                             <span className='shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-transparent dark:bg-green-600/15 dark:text-green-300'>
                                                 ${cost.toFixed(4)}
@@ -267,6 +279,11 @@ function HistoryPanelImpl({
                                     </div>
 
                                     <div className='mt-2 grid grid-cols-[repeat(auto-fill,56px)] gap-1.5'>
+                                        {imagePreviews.length === 0 && (
+                                            <div className='flex h-14 w-14 items-center justify-center rounded-md border border-dashed border-slate-200 bg-slate-100 text-slate-400 dark:border-white/15 dark:bg-neutral-900 dark:text-neutral-500'>
+                                                {isPending ? <Clock size={16} /> : '?'}
+                                            </div>
+                                        )}
                                         {imagePreviews.map((imageInfo) => (
                                             <button
                                                 key={imageInfo.filename}
@@ -318,10 +335,10 @@ function HistoryPanelImpl({
                                     <div className='mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-white/50'>
                                         <span className='flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             <Layers size={11} />
-                                            {imageCount}
+                                            {isPending ? '-' : imageCount}
                                         </span>
                                         <span className='rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
-                                            {formatDuration(item.durationMs)}
+                                            {isPending ? t('history.statusPending') : formatDuration(item.durationMs)}
                                         </span>
                                         <span className='rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
                                             {item.size || '-'}
@@ -343,20 +360,22 @@ function HistoryPanelImpl({
                                             <FileImage size={11} />
                                             {outputFormat.toUpperCase()}
                                         </span>
-                                        <span
-                                            className={cn(
-                                                'flex items-center gap-1 rounded border px-1.5 py-0.5',
-                                                expiryStatus.isExpired
-                                                    ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-200'
-                                                    : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100'
-                                            )}>
-                                            <Clock size={11} />
-                                            {expiryStatus.isExpired
-                                                ? t('history.serverExpiryExpired')
-                                                : t('history.serverExpiryCountdownShort', {
-                                                      time: expiryStatus.remainingText
-                                                  })}
-                                        </span>
+                                        {!isPending && (
+                                            <span
+                                                className={cn(
+                                                    'flex items-center gap-1 rounded border px-1.5 py-0.5',
+                                                    expiryStatus.isExpired
+                                                        ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-200'
+                                                        : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100'
+                                                )}>
+                                                <Clock size={11} />
+                                                {expiryStatus.isExpired
+                                                    ? t('history.serverExpiryExpired')
+                                                    : t('history.serverExpiryCountdownShort', {
+                                                          time: expiryStatus.remainingText
+                                                      })}
+                                            </span>
+                                        )}
                                     </div>
 
                                     <div className='mt-2 flex items-center gap-1.5'>

@@ -30,7 +30,7 @@ export default function HistoryDetailPage() {
     const params = useParams<{ timestamp: string }>();
     const searchParams = useSearchParams();
     const { language, t } = useI18n();
-    const { authMode, image2User, isAuthReady } = useHomeAuth();
+    const { authMode, clientPasswordHash, image2User, isAuthReady, isPasswordRequiredByBackend } = useHomeAuth();
     const scopedHistoryUserId = authMode === 'sub2api' ? (image2User?.id ?? null) : undefined;
     const activeImageUserId = authMode === 'sub2api' ? image2User?.id : LEGACY_IMAGE_USER_ID;
     const [item, setItem] = React.useState<HistoryMetadata | null | undefined>(undefined);
@@ -61,19 +61,89 @@ export default function HistoryDetailPage() {
             return;
         }
 
+        let cancelled = false;
+        let localMatch: HistoryMetadata | null = null;
+
         try {
             const storageKey = getHistoryStorageKey(scopedHistoryUserId);
             const storedHistory = storageKey ? localStorage.getItem(storageKey) : null;
             const parsedHistory: HistoryMetadata[] = storedHistory ? JSON.parse(storedHistory) : [];
-            const match = Array.isArray(parsedHistory)
-                ? parsedHistory.find((historyItem) => historyItem.timestamp === timestamp)
+            localMatch = Array.isArray(parsedHistory)
+                ? (parsedHistory.find((historyItem) => historyItem.timestamp === timestamp) ?? null)
                 : null;
-            setItem(match ?? null);
+            if (localMatch && (localMatch.images.length > 0 || localMatch.status !== 'pending')) {
+                setItem(localMatch);
+                return;
+            }
         } catch (error) {
             console.error('Failed to read history detail:', error);
-            setItem(null);
         }
-    }, [params.timestamp, scopedHistoryUserId]);
+
+        if (authMode === 'sub2api' && !isAuthReady) {
+            return;
+        }
+
+        if (authMode !== 'sub2api' && isPasswordRequiredByBackend && !clientPasswordHash) {
+            setItem(null);
+            return;
+        }
+
+        const loadServerHistoryItem = async () => {
+            try {
+                const query = new URLSearchParams();
+                if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
+                    query.set('passwordHash', clientPasswordHash);
+                }
+                query.set('since', timestamp.toString());
+                query.set('page_size', '1000');
+
+                const response = await fetch(`/api/image-history${query.size ? `?${query.toString()}` : ''}`, {
+                    cache: 'no-store'
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to load server image history: ${response.status}`);
+                }
+
+                const result = (await response.json()) as {
+                    data?: { items?: HistoryMetadata[] };
+                    history?: HistoryMetadata[];
+                };
+                const serverHistory = Array.isArray(result.data?.items)
+                    ? result.data.items
+                    : Array.isArray(result.history)
+                      ? result.history
+                      : [];
+                const match = serverHistory.find((historyItem) => historyItem.timestamp === timestamp) ?? null;
+
+                if (!cancelled) {
+                    setItem(
+                        match && localMatch
+                            ? {
+                                  ...localMatch,
+                                  images: match.images,
+                                  status: 'completed',
+                                  durationMs: localMatch.durationMs || match.durationMs,
+                                  output_format: localMatch.output_format || match.output_format,
+                                  storageModeUsed: 'fs'
+                              }
+                            : (match ?? localMatch ?? null)
+                    );
+                }
+            } catch (error) {
+                console.error('Failed to read server history detail:', error);
+                if (!cancelled) {
+                    setItem(null);
+                }
+            }
+        };
+
+        loadServerHistoryItem();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [authMode, clientPasswordHash, isAuthReady, isPasswordRequiredByBackend, params.timestamp, scopedHistoryUserId]);
 
     React.useEffect(() => {
         const imageIndex = Number(searchParams.get('image') ?? 0);
