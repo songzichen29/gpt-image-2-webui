@@ -6,6 +6,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+FROM deps AS prod-deps
+RUN npm prune --omit=dev
+
 FROM node:20-alpine AS builder
 WORKDIR /app
 
@@ -33,9 +36,7 @@ RUN addgroup -S nextjs \
 COPY --from=builder --chown=nextjs:nextjs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nextjs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nextjs /app/public ./public
-COPY --from=builder --chown=nextjs:nextjs /app/node_modules/minio ./node_modules/minio
-COPY --from=builder --chown=nextjs:nextjs /app/node_modules/xml2js ./node_modules/xml2js
-COPY --from=builder --chown=nextjs:nextjs /app/node_modules/sax ./node_modules/sax
+COPY --from=prod-deps --chown=nextjs:nextjs /app/node_modules ./node_modules
 
 USER nextjs
 
