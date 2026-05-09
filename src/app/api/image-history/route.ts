@@ -5,7 +5,6 @@ import {
     getImageHistoryMetaDir,
     getImageOutputDir,
     getImageStorageMode,
-    getImageHistoryObjectKey,
     listMinioObjectNames,
     readJsonFromMinio,
     isValidImageFilename
