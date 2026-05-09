@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     try {
         const user = await verifySub2ApiToken(token);
         const response = NextResponse.json({ authenticated: true, user });
-        setImage2SessionCookie(response, user);
+        setImage2SessionCookie(response, request, user);
         return response;
     } catch (error) {
         const message = error instanceof Error ? error.message : 'SUB2API_AUTH_UNAVAILABLE';

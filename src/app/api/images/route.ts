@@ -2,7 +2,12 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import { ensureImageOutputDirExists, getImageFilePath } from '@/lib/server/image-storage';
+import {
+    ensureImageHistoryMetaDirExists,
+    ensureImageOutputDirExists,
+    getImageFilePath,
+    getImageHistoryMetaPath
+} from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 // Streaming event types
@@ -24,6 +29,39 @@ type StreamingEvent = {
         revised_prompt?: string;
     }>;
     error?: string;
+};
+
+type PersistedHistoryImage = {
+    filename: string;
+    revisedPrompt?: string;
+};
+
+type PersistedHistoryMetadata = {
+    timestamp: number;
+    images: PersistedHistoryImage[];
+    status: 'completed';
+    storageModeUsed: 'fs';
+    durationMs: number;
+    quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd';
+    background: 'auto' | 'transparent' | 'opaque';
+    moderation: 'auto' | 'low';
+    prompt: string;
+    revisedPrompt?: string;
+    mode: 'generate' | 'edit';
+    costDetails: {
+        estimated_cost_usd: number;
+        text_input_tokens: number;
+        image_input_tokens: number;
+        image_output_tokens: number;
+    } | null;
+    size?: string;
+    output_compression?: number;
+    streaming?: boolean;
+    partialImages?: number;
+    sourceImageCount?: number;
+    hasMask?: boolean;
+    output_format?: 'png' | 'jpeg' | 'webp';
+    model?: string;
 };
 
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
@@ -266,6 +304,34 @@ function enqueueSseComment(
     controller.enqueue(encoder.encode(`: ${comment}\n\n`));
 }
 
+function toCostDetails(usage: OpenAI.Images.ImagesResponse['usage'] | undefined) {
+    if (!usage || !usage.input_tokens_details || typeof usage.output_tokens !== 'number') {
+        return null;
+    }
+
+    const textInputTokens = usage.input_tokens_details.text_tokens ?? 0;
+    const imageInputTokens = usage.input_tokens_details.image_tokens ?? 0;
+    const imageOutputTokens = usage.output_tokens ?? 0;
+    const estimatedCostUsd =
+        textInputTokens * 0.000005 + imageInputTokens * 0.000008 + imageOutputTokens * 0.00003;
+
+    return {
+        estimated_cost_usd: Math.round(estimatedCostUsd * 10000) / 10000,
+        text_input_tokens: textInputTokens,
+        image_input_tokens: imageInputTokens,
+        image_output_tokens: imageOutputTokens
+    };
+}
+
+async function persistFsHistoryMetadata(
+    metadata: PersistedHistoryMetadata,
+    userId?: number
+): Promise<void> {
+    await ensureImageHistoryMetaDirExists(userId);
+    const metadataPath = getImageHistoryMetaPath(metadata.timestamp, userId);
+    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+}
+
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/images');
 
@@ -341,6 +407,12 @@ export async function POST(request: NextRequest) {
 
         const mode = formData.get('mode') as 'generate' | 'edit' | null;
         const prompt = formData.get('prompt') as string | null;
+        const historyTimestampRaw = formData.get('history_timestamp');
+        const historyTimestampParsed =
+            typeof historyTimestampRaw === 'string' ? Number.parseInt(historyTimestampRaw, 10) : Number.NaN;
+        const requestTimestamp = Number.isFinite(historyTimestampParsed) && historyTimestampParsed > 0
+            ? historyTimestampParsed
+            : Date.now();
         const model = ((formData.get('model') as string | null)?.trim() || 'gpt-image-2') as
             | OpenAI.Images.ImageGenerateParams['model']
             | OpenAI.Images.ImageEditParams['model'];
@@ -358,6 +430,14 @@ export async function POST(request: NextRequest) {
         let result: OpenAI.Images.ImagesResponse;
         let requestedImageCount = 1;
         let requestSingleImage: (() => Promise<OpenAI.Images.ImagesResponse>) | null = null;
+        let historyQuality: PersistedHistoryMetadata['quality'] = 'auto';
+        let historyBackground: PersistedHistoryMetadata['background'] = 'auto';
+        let historyModeration: PersistedHistoryMetadata['moderation'] = 'auto';
+        let historySize: string | undefined;
+        let historyOutputCompression: number | undefined;
+        let historySourceImageCount = 0;
+        let historyHasMask = false;
+        let historyOutputFormat: PersistedHistoryMetadata['output_format'] = 'png';
 
         if (mode === 'generate') {
             const n = parseInt((formData.get('n') as string) || '1', 10);
@@ -373,6 +453,11 @@ export async function POST(request: NextRequest) {
             const moderation =
                 (formData.get('moderation') as OpenAI.Images.ImageGenerateParams['moderation']) || 'auto';
             const promptWithAspectInstruction = withAspectInstruction(prompt, size, responseLanguage);
+            historyQuality = quality;
+            historyBackground = background;
+            historyModeration = moderation;
+            historySize = size ?? undefined;
+            historyOutputFormat = validateOutputFormat(output_format);
 
             const baseParams = {
                 model,
@@ -389,6 +474,7 @@ export async function POST(request: NextRequest) {
                 const compression = parseInt(output_compression_str, 10);
                 if (!isNaN(compression) && compression >= 0 && compression <= 100) {
                     (baseParams as OpenAI.Images.ImageGenerateParams).output_compression = compression;
+                    historyOutputCompression = compression;
                 }
             }
 
@@ -412,9 +498,9 @@ export async function POST(request: NextRequest) {
 
                 // Create SSE response
                 const encoder = new TextEncoder();
-                const timestamp = Date.now();
+                const timestamp = requestTimestamp;
                 const fileExtension = validateOutputFormat(output_format);
-                const shouldInlineImageData = effectiveStorageMode !== 'fs';
+                const shouldInlineImageData = true;
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
@@ -541,6 +627,41 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
+                            if (effectiveStorageMode === 'fs' && completedImages.length > 0) {
+                                await persistFsHistoryMetadata(
+                                    {
+                                        timestamp,
+                                        images: completedImages.map((image) => ({
+                                            filename: image.filename,
+                                            ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                        })),
+                                        status: 'completed',
+                                        storageModeUsed: 'fs',
+                                        durationMs: Math.max(0, Date.now() - timestamp),
+                                        quality,
+                                        background,
+                                        moderation,
+                                        prompt,
+                                        revisedPrompt:
+                                            completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                        mode: 'generate',
+                                        costDetails: toCostDetails(finalUsage),
+                                        size: size ?? undefined,
+                                        output_compression:
+                                            'output_compression' in baseParams &&
+                                            typeof baseParams.output_compression === 'number'
+                                                ? baseParams.output_compression
+                                                : undefined,
+                                        streaming: true,
+                                        partialImages: actualPartialImages,
+                                        sourceImageCount: 0,
+                                        hasMask: false,
+                                        output_format: fileExtension,
+                                        model: String(model)
+                                    },
+                                    image2UserId
+                                );
+                            }
                             clearInterval(heartbeat);
                             enqueueSseData(controller, encoder, doneEvent);
                             controller.close();
@@ -577,6 +698,9 @@ export async function POST(request: NextRequest) {
             // gpt-image-2 accepts arbitrary WxH strings that the SDK's narrow literal union doesn't express.
             const size = ((formData.get('size') as string) || 'auto') as OpenAI.Images.ImageEditParams['size'];
             const quality = (formData.get('quality') as OpenAI.Images.ImageEditParams['quality']) || 'auto';
+            historyQuality = quality;
+            historySize = size && size !== 'auto' ? size : undefined;
+            historyOutputFormat = 'png';
 
             const imageFiles: File[] = [];
             for (const [key, value] of formData.entries()) {
@@ -584,12 +708,14 @@ export async function POST(request: NextRequest) {
                     imageFiles.push(value);
                 }
             }
+            historySourceImageCount = imageFiles.length;
 
             if (imageFiles.length === 0) {
                 return NextResponse.json({ error: 'No image file provided for editing.' }, { status: 400 });
             }
 
             const maskFile = formData.get('mask') as File | null;
+            historyHasMask = Boolean(maskFile);
 
             const baseEditParams = {
                 model,
@@ -621,9 +747,9 @@ export async function POST(request: NextRequest) {
 
                 // Create SSE response for edit
                 const encoder = new TextEncoder();
-                const timestamp = Date.now();
+                const timestamp = requestTimestamp;
                 const fileExtension = 'png'; // Edit mode always outputs PNG
-                const shouldInlineImageData = effectiveStorageMode !== 'fs';
+                const shouldInlineImageData = true;
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
@@ -750,6 +876,37 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
+                            if (effectiveStorageMode === 'fs' && completedImages.length > 0) {
+                                await persistFsHistoryMetadata(
+                                    {
+                                        timestamp,
+                                        images: completedImages.map((image) => ({
+                                            filename: image.filename,
+                                            ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                        })),
+                                        status: 'completed',
+                                        storageModeUsed: 'fs',
+                                        durationMs: Math.max(0, Date.now() - timestamp),
+                                        quality,
+                                        background: 'auto',
+                                        moderation: 'auto',
+                                        prompt,
+                                        revisedPrompt:
+                                            completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                        mode: 'edit',
+                                        costDetails: toCostDetails(finalUsage),
+                                        size: size && size !== 'auto' ? size : undefined,
+                                        output_compression: undefined,
+                                        streaming: true,
+                                        partialImages: Math.max(1, Math.min(partialImagesCount, 3)),
+                                        sourceImageCount: imageFiles.length,
+                                        hasMask: Boolean(maskFile),
+                                        output_format: 'png',
+                                        model: String(model)
+                                    },
+                                    image2UserId
+                                );
+                            }
                             clearInterval(heartbeat);
                             enqueueSseData(controller, encoder, doneEvent);
                             controller.close();
@@ -808,7 +965,7 @@ export async function POST(request: NextRequest) {
                     throw new Error(`Image data at index ${index} is missing base64 data.`);
                 }
                 const buffer = Buffer.from(imageData.b64_json, 'base64');
-                const timestamp = Date.now();
+                const timestamp = requestTimestamp;
 
                 const fileExtension = validateOutputFormat(formData.get('output_format'));
                 const filename = `${timestamp}-${index}.${fileExtension}`;
@@ -844,6 +1001,38 @@ export async function POST(request: NextRequest) {
         );
 
         console.log(`All images processed. Mode: ${effectiveStorageMode}`);
+
+        if (effectiveStorageMode === 'fs') {
+            const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
+            await persistFsHistoryMetadata(
+                {
+                    timestamp: requestTimestamp,
+                    images: savedImagesData.map((image) => ({
+                        filename: image.filename,
+                        ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                    })),
+                    status: 'completed',
+                    storageModeUsed: 'fs',
+                    durationMs: Math.max(0, Date.now() - requestTimestamp),
+                    quality: historyQuality,
+                    background: historyBackground,
+                    moderation: historyModeration,
+                    prompt,
+                    ...(revisedPrompt ? { revisedPrompt } : {}),
+                    mode,
+                    costDetails: toCostDetails(result.usage),
+                    size: historySize,
+                    output_compression: historyOutputCompression,
+                    streaming: false,
+                    partialImages: undefined,
+                    sourceImageCount: historySourceImageCount,
+                    hasMask: historyHasMask,
+                    output_format: historyOutputFormat,
+                    model: String(model)
+                },
+                image2UserId
+            );
+        }
 
         return NextResponse.json({
             images: savedImagesData,

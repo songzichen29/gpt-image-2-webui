@@ -862,6 +862,11 @@ export default function HomePage() {
             ...prevHistory.filter((historyItem) => historyItem.timestamp !== startTime)
         ]);
 
+        let streamedImagesForRecovery: ApiImageResponseItem[] = [];
+        let finalizeStreamingImagesForRecovery:
+            | ((images: ApiImageResponseItem[], revisedPromptFallback?: unknown, usage?: ApiUsageForCost) => Promise<void>)
+            | null = null;
+
         try {
             const response = await fetch('/api/images', {
                 method: 'POST',
@@ -903,6 +908,7 @@ export default function HomePage() {
 
                 const getOrderedStreamedImages = () =>
                     streamedImages.filter((image): image is ApiImageResponseItem => Boolean(image));
+                streamedImagesForRecovery = getOrderedStreamedImages();
 
                 const updateStreamingStats = () => {
                     setApiResponseInfo((current) =>
@@ -954,6 +960,9 @@ export default function HomePage() {
                     revisedPromptFallback?: unknown,
                     usage?: ApiUsageForCost
                 ) => {
+                    finalizeStreamingImagesForRecovery = finalizeStreamingImages;
+                    streamedImagesForRecovery = getOrderedStreamedImages();
+
                     if (hasSavedStreamingHistory) {
                         return;
                     }
@@ -1085,6 +1094,7 @@ export default function HomePage() {
                                         const imageIndex =
                                             typeof event.index === 'number' ? event.index : streamedImages.length;
                                         streamedImages[imageIndex] = completedImage;
+                                        streamedImagesForRecovery = getOrderedStreamedImages();
                                         streamingCompletedImages += 1;
                                         updateStreamingStats();
                                         await displayStreamingImages();
@@ -1238,6 +1248,20 @@ export default function HomePage() {
         } catch (err: unknown) {
             durationMs = Date.now() - startTime;
             console.error(`API Call Error after ${durationMs}ms:`, err);
+
+            const finalizeStreamingRecovery = finalizeStreamingImagesForRecovery as
+                | ((images: ApiImageResponseItem[], revisedPromptFallback?: unknown, usage?: ApiUsageForCost) => Promise<void>)
+                | null;
+            if (requestStreaming && streamedImagesForRecovery.length > 0 && finalizeStreamingRecovery) {
+                try {
+                    await finalizeStreamingRecovery(streamedImagesForRecovery);
+                    setError(null);
+                    return;
+                } catch (recoveryError) {
+                    console.error('Failed to recover streaming images after stream interruption:', recoveryError);
+                }
+            }
+
             const errorMessage = err instanceof Error ? err.message : t('page.unexpectedError');
             setError(errorMessage);
             setApiResponseInfo((current) =>

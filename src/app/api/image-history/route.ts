@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageOutputDir, isValidImageFilename } from '@/lib/server/image-storage';
+import { getImageHistoryMetaDir, getImageOutputDir, isValidImageFilename } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 const imageFilenamePattern = /^(\d+)-(\d+)\.(png|jpe?g|webp)$/i;
@@ -22,6 +22,14 @@ type ImageHistoryItem = {
     mode: 'generate';
     costDetails: null;
     output_format: 'png' | 'jpeg' | 'webp';
+    revisedPrompt?: string;
+    size?: string;
+    output_compression?: number;
+    streaming?: boolean;
+    partialImages?: number;
+    sourceImageCount?: number;
+    hasMask?: boolean;
+    model?: string;
 };
 
 function sha256(data: string): string {
@@ -105,10 +113,43 @@ export async function GET(request: NextRequest) {
         const since = getSinceTimestamp(request);
         const sortOrder = getSortOrder(request);
         const outputDir = getImageOutputDir(image2UserId);
+        const metadataDir = getImageHistoryMetaDir(image2UserId);
         const dirEntries = await fs.readdir(outputDir, { withFileTypes: true });
         const groups = new Map<number, Array<{ filename: string; index: number; outputFormat: 'png' | 'jpeg' | 'webp' }>>();
+        const metadataMap = new Map<number, ImageHistoryItem>();
+
+        try {
+            const metadataEntries = await fs.readdir(metadataDir, { withFileTypes: true });
+            for (const entry of metadataEntries) {
+                if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+
+                const timestamp = Number.parseInt(entry.name.replace(/\.json$/i, ''), 10);
+                if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
+                if (since !== null && timestamp < since) continue;
+
+                try {
+                    const raw = await fs.readFile(`${metadataDir}/${entry.name}`, 'utf8');
+                    const parsed = JSON.parse(raw) as ImageHistoryItem;
+                    if (
+                        parsed &&
+                        parsed.timestamp === timestamp &&
+                        Array.isArray(parsed.images) &&
+                        parsed.status === 'completed'
+                    ) {
+                        metadataMap.set(timestamp, parsed);
+                    }
+                } catch (error) {
+                    console.warn(`Failed to read history metadata ${entry.name}:`, error);
+                }
+            }
+        } catch (error: unknown) {
+            if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
+                throw error;
+            }
+        }
 
         dirEntries.forEach((entry) => {
+            if (entry.name === '.history') return;
             if (!entry.isFile() || !isValidImageFilename(entry.name)) return;
 
             const match = entry.name.match(imageFilenamePattern);
@@ -128,10 +169,19 @@ export async function GET(request: NextRequest) {
             groups.set(timestamp, images);
         });
 
-        const history: ImageHistoryItem[] = Array.from(groups.entries())
-            .map(([timestamp, images]) => {
+        const historyByTimestamp = new Map<number, ImageHistoryItem>();
+
+        for (const [timestamp, metadata] of metadataMap.entries()) {
+            historyByTimestamp.set(timestamp, metadata);
+        }
+
+        Array.from(groups.entries()).forEach(([timestamp, images]) => {
+            if (historyByTimestamp.has(timestamp)) {
+                return;
+            }
+
                 const orderedImages = images.sort((left, right) => left.index - right.index);
-                return {
+                historyByTimestamp.set(timestamp, {
                     timestamp,
                     images: orderedImages.map((image) => ({ filename: image.filename })),
                     status: 'completed' as const,
@@ -144,8 +194,10 @@ export async function GET(request: NextRequest) {
                     mode: 'generate' as const,
                     costDetails: null,
                     output_format: orderedImages[0]?.outputFormat ?? 'png'
-                };
-            })
+                });
+            });
+
+        const history: ImageHistoryItem[] = Array.from(historyByTimestamp.values())
             .sort((left, right) =>
                 sortOrder === 'asc' ? left.timestamp - right.timestamp : right.timestamp - left.timestamp
             );

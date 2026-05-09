@@ -105,11 +105,26 @@ export function getImage2Session(request: NextRequest): Image2SessionPayload | n
     return verifySessionToken(request.cookies.get(IMAGE2_SESSION_COOKIE)?.value);
 }
 
-export function setImage2SessionCookie(response: NextResponse, user: Image2User): void {
+function isSecureRequest(request: NextRequest): boolean {
+    const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+    if (forwardedProto) {
+        return forwardedProto === 'https';
+    }
+
+    return request.nextUrl.protocol === 'https:';
+}
+
+export function setImage2SessionCookie(response: NextResponse, request: NextRequest, user: Image2User): void {
     const sameSite = (process.env.IMAGE2_COOKIE_SAMESITE || 'lax').toLowerCase() === 'none' ? 'none' : 'lax';
-    const secure = process.env.IMAGE2_COOKIE_SECURE
-        ? process.env.IMAGE2_COOKIE_SECURE !== 'false'
-        : sameSite === 'none' || process.env.NODE_ENV === 'production';
+    const configuredSecure = process.env.IMAGE2_COOKIE_SECURE?.trim().toLowerCase();
+    const secure =
+        configuredSecure === 'true'
+            ? true
+            : configuredSecure === 'false'
+              ? false
+              : sameSite === 'none'
+                ? true
+                : isSecureRequest(request);
 
     response.cookies.set(IMAGE2_SESSION_COOKIE, createSessionToken(user), {
         httpOnly: true,

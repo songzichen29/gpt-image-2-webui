@@ -1,7 +1,7 @@
 ﻿import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageFilePath, isValidImageFilename } from '@/lib/server/image-storage';
+import { getImageFilePath, getImageHistoryMetaPath, isValidImageFilename } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 function sha256(data: string): string {
@@ -62,6 +62,7 @@ export async function POST(request: NextRequest) {
     }
 
     const deletionResults: FileDeletionResult[] = [];
+    const affectedTimestamps = new Set<number>();
 
     for (const filename of filenames) {
         if (!isValidImageFilename(filename)) {
@@ -71,6 +72,13 @@ export async function POST(request: NextRequest) {
         }
 
         const filepath = getImageFilePath(filename, image2UserId);
+        const timestampMatch = filename.match(/^(\d+)-\d+\./);
+        if (timestampMatch) {
+            const timestamp = Number.parseInt(timestampMatch[1], 10);
+            if (Number.isFinite(timestamp) && timestamp > 0) {
+                affectedTimestamps.add(timestamp);
+            }
+        }
 
         try {
             await fs.unlink(filepath);
@@ -82,6 +90,16 @@ export async function POST(request: NextRequest) {
                 deletionResults.push({ filename, success: false, error: 'File not found.' });
             } else {
                 deletionResults.push({ filename, success: false, error: 'Failed to delete file.' });
+            }
+        }
+    }
+
+    for (const timestamp of affectedTimestamps) {
+        try {
+            await fs.unlink(getImageHistoryMetaPath(timestamp, image2UserId));
+        } catch (error: unknown) {
+            if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
+                console.warn(`Failed to delete history metadata for timestamp ${timestamp}:`, error);
             }
         }
     }
