@@ -342,7 +342,7 @@ export default function HistoryPage() {
                     return next;
                 });
 
-                if (storageMode === 'fs') {
+                if (storageMode === 'fs' || storageMode === 'minio') {
                     const apiPayload: { filenames: string[]; passwordHash?: string } = {
                         filenames: filenamesToDelete
                     };

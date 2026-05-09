@@ -69,10 +69,12 @@ const explicitModeClient = process.env.NEXT_PUBLIC_IMAGE_STORAGE_MODE;
 const vercelEnvClient = process.env.NEXT_PUBLIC_VERCEL_ENV;
 const isOnVercelClient = vercelEnvClient === 'production' || vercelEnvClient === 'preview';
 
-let effectiveStorageModeClient: 'fs' | 'indexeddb';
+let effectiveStorageModeClient: 'fs' | 'indexeddb' | 'minio';
 
 if (explicitModeClient === 'fs') {
     effectiveStorageModeClient = 'fs';
+} else if (explicitModeClient === 'minio') {
+    effectiveStorageModeClient = 'minio';
 } else if (explicitModeClient === 'indexeddb') {
     effectiveStorageModeClient = 'indexeddb';
 } else if (isOnVercelClient) {
@@ -123,7 +125,7 @@ type ApiResponseInfo = {
     n: number;
     stream: boolean;
     partialImages?: number;
-    storageMode: 'fs' | 'indexeddb';
+    storageMode: 'fs' | 'indexeddb' | 'minio';
     imageCount?: number;
     filenames?: string[];
     costUsd?: number;
@@ -507,7 +509,7 @@ export default function HomePage() {
     }, []);
 
     React.useEffect(() => {
-        if (effectiveStorageModeClient !== 'fs' || isLoadingRef.current || latestImageBatch) {
+        if (effectiveStorageModeClient === 'indexeddb' || isLoadingRef.current || latestImageBatch) {
             return;
         }
 

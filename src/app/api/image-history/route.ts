@@ -135,7 +135,7 @@ async function loadFsHistory(request: NextRequest, image2UserId?: number): Promi
             timestamp,
             images: orderedImages.map((image) => ({ filename: image.filename })),
             status: 'completed',
-            storageModeUsed: 'minio',
+            storageModeUsed: 'fs',
             durationMs: 0,
             quality: 'auto',
             background: 'auto',

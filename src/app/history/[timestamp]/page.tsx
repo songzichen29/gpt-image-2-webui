@@ -179,7 +179,7 @@ export default function HistoryDetailPage() {
                 return;
             }
 
-            if (storageMode === 'fs') {
+            if (storageMode === 'fs' || storageMode === 'minio') {
                 nextSrcByFilename[imageInfo.filename] = `/api/image/${imageInfo.filename}`;
             }
         });

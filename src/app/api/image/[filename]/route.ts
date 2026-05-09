@@ -49,7 +49,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         });
     } catch (error: unknown) {
         console.error(`Error serving image ${filename}:`, error);
-        if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        if (
+            typeof error === 'object' &&
+            error !== null &&
+            (
+                ('code' in error && (error.code === 'ENOENT' || error.code === 'NoSuchKey' || error.code === 'NotFound')) ||
+                ('name' in error && error.name === 'S3Error')
+            )
+        ) {
             return NextResponse.json({ error: 'Image not found' }, { status: 404 });
         }
         return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

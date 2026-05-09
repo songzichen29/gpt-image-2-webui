@@ -173,6 +173,17 @@ function validateOutputFormat(format: unknown): ValidOutputFormat {
     return 'png'; // default fallback
 }
 
+function getOutputMimeType(format: ValidOutputFormat): string {
+    switch (format) {
+        case 'jpeg':
+            return 'image/jpeg';
+        case 'webp':
+            return 'image/webp';
+        default:
+            return 'image/png';
+    }
+}
+
 function getRevisedPrompt(source: unknown): string | undefined {
     if (!source || typeof source !== 'object' || !('revised_prompt' in source)) {
         return undefined;
@@ -482,8 +493,10 @@ export async function POST(request: NextRequest) {
                 }
             }
 
-            // Handle streaming mode for generation
-            const shouldUseStreamingResponse = streamRequested || requestedImageCount === 1;
+            // Handle streaming mode for generation.
+            // 仅在客户端显式请求 stream=true 时才返回 SSE；
+            // 单图请求 (n=1) 不应被强制升级为流式，否则前端未勾选流式时也会收到 text/event-stream。
+            const shouldUseStreamingResponse = streamRequested;
 
             if (shouldUseStreamingResponse) {
                 const actualPartialImages = Math.max(1, Math.min(streamRequested ? partialImagesCount : 1, 3)) as
@@ -598,7 +611,7 @@ export async function POST(request: NextRequest) {
                                         console.log(`Streaming: Saved image ${filename}`);
                                     } else if (effectiveStorageMode === 'minio' && b64Json) {
                                         const buffer = Buffer.from(b64Json, 'base64');
-                                        await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
+                                        await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                     }
 
                                     const savedPath =
@@ -649,7 +662,7 @@ export async function POST(request: NextRequest) {
                                     await fs.writeFile(filepath, buffer);
                                 } else if (effectiveStorageMode === 'minio') {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
+                                    await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
                                 const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
@@ -689,7 +702,7 @@ export async function POST(request: NextRequest) {
                                                 ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
                                             })),
                                             status: 'completed',
-                                            storageModeUsed: 'minio',
+                                            storageModeUsed: 'fs',
                                             durationMs: Math.max(0, Date.now() - timestamp),
                                             quality,
                                             background,
@@ -952,7 +965,7 @@ export async function POST(request: NextRequest) {
                                         console.log(`Streaming edit: Saved image ${filename}`);
                                     } else if (effectiveStorageMode === 'minio' && b64Json) {
                                         const buffer = Buffer.from(b64Json, 'base64');
-                                        await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
+                                        await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                     }
 
                                     const savedPath =
@@ -1003,7 +1016,7 @@ export async function POST(request: NextRequest) {
                                     await fs.writeFile(filepath, buffer);
                                 } else if (effectiveStorageMode === 'minio') {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
+                                    await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
                                 const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
@@ -1043,7 +1056,7 @@ export async function POST(request: NextRequest) {
                                                 ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
                                             })),
                                             status: 'completed',
-                                            storageModeUsed: 'minio',
+                                            storageModeUsed: 'fs',
                                             durationMs: Math.max(0, Date.now() - timestamp),
                                             quality,
                                             background: 'auto',
@@ -1165,7 +1178,7 @@ export async function POST(request: NextRequest) {
                     await fs.writeFile(filepath, buffer);
                     console.log(`Successfully saved image: ${filename}`);
                 } else if (effectiveStorageMode === 'minio') {
-                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
+                    await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                 } else {
                 }
 
@@ -1203,7 +1216,7 @@ export async function POST(request: NextRequest) {
                         ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
                     })),
                     status: 'completed',
-                    storageModeUsed: 'minio',
+                    storageModeUsed: 'fs',
                     durationMs: Math.max(0, Date.now() - requestTimestamp),
                     quality: historyQuality,
                     background: historyBackground,
