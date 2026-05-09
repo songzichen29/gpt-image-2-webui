@@ -311,6 +311,13 @@ function enqueueSseComment(
     controller.enqueue(encoder.encode(`: ${comment}\n\n`));
 }
 
+function isClosedControllerError(error: unknown): boolean {
+    return (
+        error instanceof TypeError &&
+        (error.message.includes('Controller is already closed') || error.message.includes('Invalid state'))
+    );
+}
+
 function toCostDetails(usage: OpenAI.Images.ImagesResponse['usage'] | undefined) {
     if (!usage || !usage.input_tokens_details || typeof usage.output_tokens !== 'number') {
         return null;
@@ -491,9 +498,9 @@ export async function POST(request: NextRequest) {
                 };
 
                 console.log('Calling OpenAI generate with streaming, params:', streamParams);
-                const stream = await openai.images.generate(streamParams);
 
-                // Create SSE response
+                // Create SSE response immediately so the client receives headers/heartbeats
+                // while we are still waiting for the upstream image stream to start.
                 const encoder = new TextEncoder();
                 const timestamp = requestTimestamp;
                 const fileExtension = validateOutputFormat(output_format);
@@ -501,16 +508,54 @@ export async function POST(request: NextRequest) {
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
-                        enqueueSseComment(controller, encoder, 'connected');
+                        let streamClosed = false;
+                        const safeClose = () => {
+                            if (streamClosed) return;
+                            streamClosed = true;
+                            try {
+                                controller.close();
+                            } catch {}
+                        };
+                        const safeEnqueueComment = (comment: string) => {
+                            if (streamClosed) return false;
+                            try {
+                                enqueueSseComment(controller, encoder, comment);
+                                return true;
+                            } catch (error) {
+                                if (isClosedControllerError(error)) {
+                                    streamClosed = true;
+                                    return false;
+                                }
+                                throw error;
+                            }
+                        };
+                        const safeEnqueueData = (data: StreamingEvent) => {
+                            if (streamClosed) return false;
+                            try {
+                                enqueueSseData(controller, encoder, data);
+                                return true;
+                            } catch (error) {
+                                if (isClosedControllerError(error)) {
+                                    streamClosed = true;
+                                    return false;
+                                }
+                                throw error;
+                            }
+                        };
+
+                        safeEnqueueComment('connected');
                         const heartbeat = setInterval(() => {
                             try {
-                                enqueueSseComment(controller, encoder, 'keep-alive');
+                                if (!safeEnqueueComment('keep-alive')) {
+                                    clearInterval(heartbeat);
+                                }
                             } catch {
                                 clearInterval(heartbeat);
                             }
                         }, SSE_HEARTBEAT_INTERVAL_MS);
 
                         try {
+                            const stream = await openai.images.generate(streamParams);
                             const completedImages: Array<{
                                 filename: string;
                                 b64_json?: string;
@@ -537,7 +582,9 @@ export async function POST(request: NextRequest) {
                                         partial_image_index: partialImageIndex,
                                         b64_json: b64Json
                                     };
-                                    enqueueSseData(controller, encoder, partialEvent);
+                                    if (!safeEnqueueData(partialEvent)) {
+                                        break;
+                                    }
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
@@ -576,7 +623,9 @@ export async function POST(request: NextRequest) {
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
-                                    enqueueSseData(controller, encoder, completedEvent);
+                                    if (!safeEnqueueData(completedEvent)) {
+                                        break;
+                                    }
 
                                     imageIndex++;
 
@@ -620,7 +669,7 @@ export async function POST(request: NextRequest) {
                                     path: savedPath,
                                     output_format: fileExtension
                                 };
-                                enqueueSseData(controller, encoder, fallbackEvent);
+                                safeEnqueueData(fallbackEvent);
                             }
 
                             // Send final done event with all images and usage
@@ -702,8 +751,8 @@ export async function POST(request: NextRequest) {
                                 }
                             }
                             clearInterval(heartbeat);
-                            enqueueSseData(controller, encoder, doneEvent);
-                            controller.close();
+                            safeEnqueueData(doneEvent);
+                            safeClose();
                         } catch (error) {
                             console.error('Streaming error:', error);
                             const errorEvent: StreamingEvent = {
@@ -711,8 +760,8 @@ export async function POST(request: NextRequest) {
                                 error: error instanceof Error ? error.message : 'Streaming error occurred'
                             };
                             clearInterval(heartbeat);
-                            enqueueSseData(controller, encoder, errorEvent);
-                            controller.close();
+                            safeEnqueueData(errorEvent);
+                            safeClose();
                         }
                     }
                 });
@@ -804,9 +853,8 @@ export async function POST(request: NextRequest) {
                     ...(maskFile ? { mask: maskFile } : {})
                 };
 
-                const stream = await openai.images.edit(streamEditParams);
-
-                // Create SSE response for edit
+                // Create SSE response for edit immediately so the client receives
+                // headers/heartbeats while waiting for the upstream stream.
                 const encoder = new TextEncoder();
                 const timestamp = requestTimestamp;
                 const fileExtension = 'png'; // Edit mode always outputs PNG
@@ -814,16 +862,54 @@ export async function POST(request: NextRequest) {
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
-                        enqueueSseComment(controller, encoder, 'connected');
+                        let streamClosed = false;
+                        const safeClose = () => {
+                            if (streamClosed) return;
+                            streamClosed = true;
+                            try {
+                                controller.close();
+                            } catch {}
+                        };
+                        const safeEnqueueComment = (comment: string) => {
+                            if (streamClosed) return false;
+                            try {
+                                enqueueSseComment(controller, encoder, comment);
+                                return true;
+                            } catch (error) {
+                                if (isClosedControllerError(error)) {
+                                    streamClosed = true;
+                                    return false;
+                                }
+                                throw error;
+                            }
+                        };
+                        const safeEnqueueData = (data: StreamingEvent) => {
+                            if (streamClosed) return false;
+                            try {
+                                enqueueSseData(controller, encoder, data);
+                                return true;
+                            } catch (error) {
+                                if (isClosedControllerError(error)) {
+                                    streamClosed = true;
+                                    return false;
+                                }
+                                throw error;
+                            }
+                        };
+
+                        safeEnqueueComment('connected');
                         const heartbeat = setInterval(() => {
                             try {
-                                enqueueSseComment(controller, encoder, 'keep-alive');
+                                if (!safeEnqueueComment('keep-alive')) {
+                                    clearInterval(heartbeat);
+                                }
                             } catch {
                                 clearInterval(heartbeat);
                             }
                         }, SSE_HEARTBEAT_INTERVAL_MS);
 
                         try {
+                            const stream = await openai.images.edit(streamEditParams);
                             const completedImages: Array<{
                                 filename: string;
                                 b64_json?: string;
@@ -850,7 +936,9 @@ export async function POST(request: NextRequest) {
                                         partial_image_index: partialImageIndex,
                                         b64_json: b64Json
                                     };
-                                    enqueueSseData(controller, encoder, partialEvent);
+                                    if (!safeEnqueueData(partialEvent)) {
+                                        break;
+                                    }
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
@@ -889,7 +977,9 @@ export async function POST(request: NextRequest) {
                                         output_format: fileExtension,
                                         revised_prompt: revisedPrompt
                                     };
-                                    enqueueSseData(controller, encoder, completedEvent);
+                                    if (!safeEnqueueData(completedEvent)) {
+                                        break;
+                                    }
 
                                     imageIndex++;
 
@@ -933,7 +1023,7 @@ export async function POST(request: NextRequest) {
                                     path: savedPath,
                                     output_format: fileExtension
                                 };
-                                enqueueSseData(controller, encoder, fallbackEvent);
+                                safeEnqueueData(fallbackEvent);
                             }
 
                             // Send final done event with all images and usage
@@ -1007,8 +1097,8 @@ export async function POST(request: NextRequest) {
                                 }
                             }
                             clearInterval(heartbeat);
-                            enqueueSseData(controller, encoder, doneEvent);
-                            controller.close();
+                            safeEnqueueData(doneEvent);
+                            safeClose();
                         } catch (error) {
                             console.error('Streaming edit error:', error);
                             const errorEvent: StreamingEvent = {
@@ -1016,8 +1106,8 @@ export async function POST(request: NextRequest) {
                                 error: error instanceof Error ? error.message : 'Streaming error occurred'
                             };
                             clearInterval(heartbeat);
-                            enqueueSseData(controller, encoder, errorEvent);
-                            controller.close();
+                            safeEnqueueData(errorEvent);
+                            safeClose();
                         }
                     }
                 });
