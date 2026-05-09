@@ -37,7 +37,7 @@ export type HistoryMetadata = {
     images: HistoryImage[];
     status?: 'pending' | 'completed' | 'error';
     errorMessage?: string;
-    storageModeUsed?: 'fs' | 'indexeddb';
+    storageModeUsed?: 'fs' | 'indexeddb' | 'minio';
     durationMs: number;
     quality: GenerationFormData['quality'];
     background: GenerationFormData['background'];
@@ -647,7 +647,7 @@ export default function HomePage() {
                     status: 'completed',
                     durationMs: latestHistoryEntry.durationMs || serverItem.durationMs,
                     output_format: latestHistoryEntry.output_format || serverItem.output_format,
-                    storageModeUsed: 'fs'
+                    storageModeUsed: 'minio'
                 };
 
                 setHistory((prevHistory) =>

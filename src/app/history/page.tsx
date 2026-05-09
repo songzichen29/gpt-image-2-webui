@@ -134,7 +134,7 @@ export default function HistoryPage() {
                                 status: 'completed',
                                 durationMs: item.durationMs || serverItem.durationMs,
                                 output_format: item.output_format || serverItem.output_format,
-                                storageModeUsed: 'fs'
+                                storageModeUsed: 'minio'
                             };
                         })
                     );
@@ -181,7 +181,7 @@ export default function HistoryPage() {
                     status: 'completed' as const,
                     durationMs: item.durationMs || serverItem.durationMs,
                     output_format: item.output_format || serverItem.output_format,
-                    storageModeUsed: 'fs' as const
+                    storageModeUsed: 'minio' as const
                 };
             }
 

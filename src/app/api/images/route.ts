@@ -5,8 +5,15 @@ import OpenAI from 'openai';
 import {
     ensureImageHistoryMetaDirExists,
     ensureImageOutputDirExists,
+    getImageMaskObjectKey,
+    getImageSourceObjectKey,
+    getImageStorageMode,
     getImageFilePath,
-    getImageHistoryMetaPath
+    getImageHistoryMetaPath,
+    getImageHistoryObjectKey,
+    uploadJsonToMinio,
+    uploadBufferToMinioByKey,
+    uploadImageToMinio
 } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
@@ -40,7 +47,7 @@ type PersistedHistoryMetadata = {
     timestamp: number;
     images: PersistedHistoryImage[];
     status: 'completed';
-    storageModeUsed: 'fs';
+    storageModeUsed: 'fs' | 'minio';
     durationMs: number;
     quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd';
     background: 'auto' | 'transparent' | 'opaque';
@@ -332,26 +339,16 @@ async function persistFsHistoryMetadata(
     await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
+async function persistMinioHistoryMetadata(metadata: PersistedHistoryMetadata, userId?: number): Promise<void> {
+    await uploadJsonToMinio(getImageHistoryObjectKey(metadata.timestamp, userId), metadata);
+}
+
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/images');
 
     try {
-        let effectiveStorageMode: 'fs' | 'indexeddb';
-        const explicitMode = process.env.NEXT_PUBLIC_IMAGE_STORAGE_MODE;
-        const isOnVercel = process.env.VERCEL === '1';
-
-        if (explicitMode === 'fs') {
-            effectiveStorageMode = 'fs';
-        } else if (explicitMode === 'indexeddb') {
-            effectiveStorageMode = 'indexeddb';
-        } else if (isOnVercel) {
-            effectiveStorageMode = 'indexeddb';
-        } else {
-            effectiveStorageMode = 'fs';
-        }
-        console.log(
-            `Effective Image Storage Mode: ${effectiveStorageMode} (Explicit: ${explicitMode || 'unset'}, Vercel: ${isOnVercel})`
-        );
+        const effectiveStorageMode = getImageStorageMode();
+        console.log(`Effective Image Storage Mode: ${effectiveStorageMode}`);
 
         const image2Session = getImage2Session(request);
         const image2UserId = image2Session?.user.id;
@@ -552,6 +549,9 @@ export async function POST(request: NextRequest) {
                                         const filepath = getImageFilePath(filename, image2UserId);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming: Saved image ${filename}`);
+                                    } else if (effectiveStorageMode === 'minio' && b64Json) {
+                                        const buffer = Buffer.from(b64Json, 'base64');
+                                        await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
                                     }
 
                                     const savedPath =
@@ -598,6 +598,9 @@ export async function POST(request: NextRequest) {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
                                     const filepath = getImageFilePath(filename, image2UserId);
                                     await fs.writeFile(filepath, buffer);
+                                } else if (effectiveStorageMode === 'minio') {
+                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
+                                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
                                 }
 
                                 const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
@@ -627,40 +630,76 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
-                            if (effectiveStorageMode === 'fs' && completedImages.length > 0) {
-                                await persistFsHistoryMetadata(
-                                    {
-                                        timestamp,
-                                        images: completedImages.map((image) => ({
-                                            filename: image.filename,
-                                            ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
-                                        })),
-                                        status: 'completed',
-                                        storageModeUsed: 'fs',
-                                        durationMs: Math.max(0, Date.now() - timestamp),
-                                        quality,
-                                        background,
-                                        moderation,
-                                        prompt,
-                                        revisedPrompt:
-                                            completedImages.find((image) => image.revised_prompt)?.revised_prompt,
-                                        mode: 'generate',
-                                        costDetails: toCostDetails(finalUsage),
-                                        size: size ?? undefined,
-                                        output_compression:
-                                            'output_compression' in baseParams &&
-                                            typeof baseParams.output_compression === 'number'
-                                                ? baseParams.output_compression
-                                                : undefined,
-                                        streaming: true,
-                                        partialImages: actualPartialImages,
-                                        sourceImageCount: 0,
-                                        hasMask: false,
-                                        output_format: fileExtension,
-                                        model: String(model)
-                                    },
-                                    image2UserId
-                                );
+                            if (completedImages.length > 0) {
+                                if (effectiveStorageMode === 'fs') {
+                                    await persistFsHistoryMetadata(
+                                        {
+                                            timestamp,
+                                            images: completedImages.map((image) => ({
+                                                filename: image.filename,
+                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                            })),
+                                            status: 'completed',
+                                            storageModeUsed: 'minio',
+                                            durationMs: Math.max(0, Date.now() - timestamp),
+                                            quality,
+                                            background,
+                                            moderation,
+                                            prompt,
+                                            revisedPrompt:
+                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                            mode: 'generate',
+                                            costDetails: toCostDetails(finalUsage),
+                                            size: size ?? undefined,
+                                            output_compression:
+                                                'output_compression' in baseParams &&
+                                                typeof baseParams.output_compression === 'number'
+                                                    ? baseParams.output_compression
+                                                    : undefined,
+                                            streaming: true,
+                                            partialImages: actualPartialImages,
+                                            sourceImageCount: 0,
+                                            hasMask: false,
+                                            output_format: fileExtension,
+                                            model: String(model)
+                                        },
+                                        image2UserId
+                                    );
+                                } else if (effectiveStorageMode === 'minio') {
+                                    await persistMinioHistoryMetadata(
+                                        {
+                                            timestamp,
+                                            images: completedImages.map((image) => ({
+                                                filename: image.filename,
+                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                            })),
+                                            status: 'completed',
+                                            storageModeUsed: 'minio',
+                                            durationMs: Math.max(0, Date.now() - timestamp),
+                                            quality,
+                                            background,
+                                            moderation,
+                                            prompt,
+                                            revisedPrompt:
+                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                            mode: 'generate',
+                                            costDetails: toCostDetails(finalUsage),
+                                            size: size ?? undefined,
+                                            output_compression:
+                                                'output_compression' in baseParams &&
+                                                typeof baseParams.output_compression === 'number'
+                                                    ? baseParams.output_compression
+                                                    : undefined,
+                                            streaming: true,
+                                            partialImages: actualPartialImages,
+                                            sourceImageCount: 0,
+                                            hasMask: false,
+                                            output_format: fileExtension,
+                                            model: String(model)
+                                        },
+                                        image2UserId
+                                    );
+                                }
                             }
                             clearInterval(heartbeat);
                             enqueueSseData(controller, encoder, doneEvent);
@@ -716,6 +755,28 @@ export async function POST(request: NextRequest) {
 
             const maskFile = formData.get('mask') as File | null;
             historyHasMask = Boolean(maskFile);
+
+            if (effectiveStorageMode === 'minio') {
+                await Promise.all(
+                    imageFiles.map(async (file) => {
+                        const buffer = Buffer.from(await file.arrayBuffer());
+                        await uploadBufferToMinioByKey(
+                            getImageSourceObjectKey(file.name, image2UserId, requestTimestamp),
+                            buffer,
+                            file.type || 'application/octet-stream'
+                        );
+                    })
+                );
+
+                if (maskFile) {
+                    const maskBuffer = Buffer.from(await maskFile.arrayBuffer());
+                    await uploadBufferToMinioByKey(
+                        getImageMaskObjectKey(maskFile.name, image2UserId, requestTimestamp),
+                        maskBuffer,
+                        maskFile.type || 'image/png'
+                    );
+                }
+            }
 
             const baseEditParams = {
                 model,
@@ -801,6 +862,9 @@ export async function POST(request: NextRequest) {
                                         const filepath = getImageFilePath(filename, image2UserId);
                                         await fs.writeFile(filepath, buffer);
                                         console.log(`Streaming edit: Saved image ${filename}`);
+                                    } else if (effectiveStorageMode === 'minio' && b64Json) {
+                                        const buffer = Buffer.from(b64Json, 'base64');
+                                        await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
                                     }
 
                                     const savedPath =
@@ -847,6 +911,9 @@ export async function POST(request: NextRequest) {
                                     const buffer = Buffer.from(lastPartialB64Json, 'base64');
                                     const filepath = getImageFilePath(filename, image2UserId);
                                     await fs.writeFile(filepath, buffer);
+                                } else if (effectiveStorageMode === 'minio') {
+                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
+                                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
                                 }
 
                                 const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
@@ -876,36 +943,68 @@ export async function POST(request: NextRequest) {
                                 revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
-                            if (effectiveStorageMode === 'fs' && completedImages.length > 0) {
-                                await persistFsHistoryMetadata(
-                                    {
-                                        timestamp,
-                                        images: completedImages.map((image) => ({
-                                            filename: image.filename,
-                                            ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
-                                        })),
-                                        status: 'completed',
-                                        storageModeUsed: 'fs',
-                                        durationMs: Math.max(0, Date.now() - timestamp),
-                                        quality,
-                                        background: 'auto',
-                                        moderation: 'auto',
-                                        prompt,
-                                        revisedPrompt:
-                                            completedImages.find((image) => image.revised_prompt)?.revised_prompt,
-                                        mode: 'edit',
-                                        costDetails: toCostDetails(finalUsage),
-                                        size: size && size !== 'auto' ? size : undefined,
-                                        output_compression: undefined,
-                                        streaming: true,
-                                        partialImages: Math.max(1, Math.min(partialImagesCount, 3)),
-                                        sourceImageCount: imageFiles.length,
-                                        hasMask: Boolean(maskFile),
-                                        output_format: 'png',
-                                        model: String(model)
-                                    },
-                                    image2UserId
-                                );
+                            if (completedImages.length > 0) {
+                                if (effectiveStorageMode === 'fs') {
+                                    await persistFsHistoryMetadata(
+                                        {
+                                            timestamp,
+                                            images: completedImages.map((image) => ({
+                                                filename: image.filename,
+                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                            })),
+                                            status: 'completed',
+                                            storageModeUsed: 'minio',
+                                            durationMs: Math.max(0, Date.now() - timestamp),
+                                            quality,
+                                            background: 'auto',
+                                            moderation: 'auto',
+                                            prompt,
+                                            revisedPrompt:
+                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                            mode: 'edit',
+                                            costDetails: toCostDetails(finalUsage),
+                                            size: size && size !== 'auto' ? size : undefined,
+                                            output_compression: undefined,
+                                            streaming: true,
+                                            partialImages: Math.max(1, Math.min(partialImagesCount, 3)),
+                                            sourceImageCount: imageFiles.length,
+                                            hasMask: Boolean(maskFile),
+                                            output_format: 'png',
+                                            model: String(model)
+                                        },
+                                        image2UserId
+                                    );
+                                } else if (effectiveStorageMode === 'minio') {
+                                    await persistMinioHistoryMetadata(
+                                        {
+                                            timestamp,
+                                            images: completedImages.map((image) => ({
+                                                filename: image.filename,
+                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                            })),
+                                            status: 'completed',
+                                            storageModeUsed: 'minio',
+                                            durationMs: Math.max(0, Date.now() - timestamp),
+                                            quality,
+                                            background: 'auto',
+                                            moderation: 'auto',
+                                            prompt,
+                                            revisedPrompt:
+                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+                                            mode: 'edit',
+                                            costDetails: toCostDetails(finalUsage),
+                                            size: size && size !== 'auto' ? size : undefined,
+                                            output_compression: undefined,
+                                            streaming: true,
+                                            partialImages: Math.max(1, Math.min(partialImagesCount, 3)),
+                                            sourceImageCount: imageFiles.length,
+                                            hasMask: Boolean(maskFile),
+                                            output_format: 'png',
+                                            model: String(model)
+                                        },
+                                        image2UserId
+                                    );
+                                }
                             }
                             clearInterval(heartbeat);
                             enqueueSseData(controller, encoder, doneEvent);
@@ -975,6 +1074,8 @@ export async function POST(request: NextRequest) {
                     console.log(`Attempting to save image to: ${filepath}`);
                     await fs.writeFile(filepath, buffer);
                     console.log(`Successfully saved image: ${filename}`);
+                } else if (effectiveStorageMode === 'minio') {
+                    await uploadImageToMinio(filename, buffer, image2UserId, 'image/png');
                 } else {
                 }
 
@@ -1012,7 +1113,37 @@ export async function POST(request: NextRequest) {
                         ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
                     })),
                     status: 'completed',
-                    storageModeUsed: 'fs',
+                    storageModeUsed: 'minio',
+                    durationMs: Math.max(0, Date.now() - requestTimestamp),
+                    quality: historyQuality,
+                    background: historyBackground,
+                    moderation: historyModeration,
+                    prompt,
+                    ...(revisedPrompt ? { revisedPrompt } : {}),
+                    mode,
+                    costDetails: toCostDetails(result.usage),
+                    size: historySize,
+                    output_compression: historyOutputCompression,
+                    streaming: false,
+                    partialImages: undefined,
+                    sourceImageCount: historySourceImageCount,
+                    hasMask: historyHasMask,
+                    output_format: historyOutputFormat,
+                    model: String(model)
+                },
+                image2UserId
+            );
+        } else if (effectiveStorageMode === 'minio') {
+            const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
+            await persistMinioHistoryMetadata(
+                {
+                    timestamp: requestTimestamp,
+                    images: savedImagesData.map((image) => ({
+                        filename: image.filename,
+                        ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                    })),
+                    status: 'completed',
+                    storageModeUsed: 'minio',
                     durationMs: Math.max(0, Date.now() - requestTimestamp),
                     quality: historyQuality,
                     background: historyBackground,

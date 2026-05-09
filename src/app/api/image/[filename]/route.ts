@@ -2,7 +2,7 @@ import { createReadStream } from 'fs';
 import fs from 'fs/promises';
 import { lookup } from 'mime-types';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageFilePath, isValidImageFilename } from '@/lib/server/image-storage';
+import { getImageFilePath, getImageStorageMode, getMinioImageBuffer } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
@@ -12,21 +12,30 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
 
-    if (!isValidImageFilename(filename)) {
-        return NextResponse.json({ error: 'Invalid filename' }, { status: 400 });
-    }
-
     const image2Session = getImage2Session(request);
     const image2UserId = image2Session?.user.id;
     if (isSub2ApiSsoEnabled() && !image2UserId) {
         return unauthorizedImage2Response(request);
     }
 
-    const filepath = getImageFilePath(filename, image2UserId);
-
     try {
-        const fileStats = await fs.stat(filepath);
+        if (getImageStorageMode() === 'minio') {
+            const buffer = await getMinioImageBuffer(filename, image2UserId);
+            if (!buffer) {
+                return NextResponse.json({ error: 'Image not found' }, { status: 404 });
+            }
 
+            return new NextResponse(buffer, {
+                status: 200,
+                headers: {
+                    'Content-Type': lookup(filename) || 'application/octet-stream',
+                    'Cache-Control': 'public, max-age=31536000, immutable'
+                }
+            });
+        }
+
+        const filepath = getImageFilePath(filename, image2UserId);
+        const fileStats = await fs.stat(filepath);
         const contentType = lookup(filename) || 'application/octet-stream';
         const fileStream = createReadStream(filepath);
 

@@ -125,7 +125,7 @@ export default function HistoryDetailPage() {
                                   status: 'completed',
                                   durationMs: localMatch.durationMs || match.durationMs,
                                   output_format: localMatch.output_format || match.output_format,
-                                  storageModeUsed: 'fs'
+                                  storageModeUsed: 'minio'
                               }
                             : (match ?? localMatch ?? null)
                     );

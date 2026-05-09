@@ -1,7 +1,15 @@
-﻿import crypto from 'crypto';
+import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageFilePath, getImageHistoryMetaPath, isValidImageFilename } from '@/lib/server/image-storage';
+import {
+    deleteImageFromMinio,
+    deleteMinioObjectByKey,
+    getImageFilePath,
+    getImageHistoryMetaPath,
+    getImageHistoryObjectKey,
+    getImageStorageMode,
+    isValidImageFilename
+} from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 function sha256(data: string): string {
@@ -34,17 +42,15 @@ export async function POST(request: NextRequest) {
 
         if (!isSub2ApiSsoEnabled() && process.env.APP_PASSWORD) {
             const clientPasswordHash = tempBodyForAuth.passwordHash as string | null;
-
             if (!clientPasswordHash) {
-                console.error('Missing password hash for delete operation.');
                 return NextResponse.json({ error: 'Unauthorized: Missing password hash.' }, { status: 401 });
             }
             const serverPasswordHash = sha256(process.env.APP_PASSWORD);
             if (clientPasswordHash !== serverPasswordHash) {
-                console.error('Invalid password hash for delete operation.');
                 return NextResponse.json({ error: 'Unauthorized: Invalid password.' }, { status: 401 });
             }
         }
+
         requestBody = await request.json();
     } catch (e) {
         console.error('Error parsing request body for /api/image-delete:', e);
@@ -52,7 +58,6 @@ export async function POST(request: NextRequest) {
     }
 
     const { filenames } = requestBody;
-
     if (!Array.isArray(filenames) || filenames.some((fn) => typeof fn !== 'string')) {
         return NextResponse.json({ error: 'Invalid filenames: Must be an array of strings.' }, { status: 400 });
     }
@@ -63,10 +68,10 @@ export async function POST(request: NextRequest) {
 
     const deletionResults: FileDeletionResult[] = [];
     const affectedTimestamps = new Set<number>();
+    const storageMode = getImageStorageMode();
 
     for (const filename of filenames) {
         if (!isValidImageFilename(filename)) {
-            console.warn(`Invalid filename for deletion: ${filename}`);
             deletionResults.push({ filename, success: false, error: 'Invalid filename format.' });
             continue;
         }
@@ -81,8 +86,11 @@ export async function POST(request: NextRequest) {
         }
 
         try {
-            await fs.unlink(filepath);
-            console.log(`Successfully deleted image: ${filepath}`);
+            if (storageMode === 'minio') {
+                await deleteImageFromMinio(filename, image2UserId);
+            } else {
+                await fs.unlink(filepath);
+            }
             deletionResults.push({ filename, success: true });
         } catch (error: unknown) {
             console.error(`Error deleting image ${filepath}:`, error);
@@ -96,7 +104,11 @@ export async function POST(request: NextRequest) {
 
     for (const timestamp of affectedTimestamps) {
         try {
-            await fs.unlink(getImageHistoryMetaPath(timestamp, image2UserId));
+            if (storageMode === 'minio') {
+                await deleteMinioObjectByKey(getImageHistoryObjectKey(timestamp, image2UserId));
+            } else {
+                await fs.unlink(getImageHistoryMetaPath(timestamp, image2UserId));
+            }
         } catch (error: unknown) {
             if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
                 console.warn(`Failed to delete history metadata for timestamp ${timestamp}:`, error);
@@ -105,7 +117,6 @@ export async function POST(request: NextRequest) {
     }
 
     const allSucceeded = deletionResults.every((r) => r.success);
-
     return NextResponse.json(
         {
             message: allSucceeded ? 'All files deleted successfully.' : 'Some files could not be deleted.',
