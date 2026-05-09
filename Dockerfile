@@ -33,6 +33,9 @@ RUN addgroup -S nextjs \
 COPY --from=builder --chown=nextjs:nextjs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nextjs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nextjs /app/public ./public
+COPY --from=builder --chown=nextjs:nextjs /app/node_modules/minio ./node_modules/minio
+COPY --from=builder --chown=nextjs:nextjs /app/node_modules/xml2js ./node_modules/xml2js
+COPY --from=builder --chown=nextjs:nextjs /app/node_modules/sax ./node_modules/sax
 
 USER nextjs
 
