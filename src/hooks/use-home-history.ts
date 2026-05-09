@@ -36,6 +36,17 @@ function readHistoryFromStorage<T>(storageKey: string | null) {
     return [];
 }
 
+function areHistoriesEqual<T>(left: T[], right: T[]): boolean {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+
+    try {
+        return JSON.stringify(left) === JSON.stringify(right);
+    } catch {
+        return false;
+    }
+}
+
 export function useHomeHistory<T>(userId?: number | null) {
     const storageKey = React.useMemo(() => getHistoryStorageKey(userId), [userId]);
     const [history, setHistory] = React.useState<T[]>([]);
@@ -44,13 +55,19 @@ export function useHomeHistory<T>(userId?: number | null) {
 
     React.useEffect(() => {
         setIsHistoryLoaded(false);
-        setHistory(readHistoryFromStorage<T>(storageKey));
+        setHistory((prevHistory) => {
+            const nextHistory = readHistoryFromStorage<T>(storageKey);
+            return areHistoriesEqual(prevHistory, nextHistory) ? prevHistory : nextHistory;
+        });
         setIsHistoryLoaded(true);
     }, [storageKey]);
 
     React.useEffect(() => {
         const refreshHistory = () => {
-            setHistory(readHistoryFromStorage<T>(storageKey));
+            setHistory((prevHistory) => {
+                const nextHistory = readHistoryFromStorage<T>(storageKey);
+                return areHistoriesEqual(prevHistory, nextHistory) ? prevHistory : nextHistory;
+            });
         };
 
         const refreshWhenVisible = () => {

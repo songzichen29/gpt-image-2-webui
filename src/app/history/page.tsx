@@ -54,6 +54,15 @@ export default function HistoryPage() {
     );
     const isImageCacheReady = allDbImages !== undefined;
     const hasPendingHistory = history.some((item) => item.status === 'pending');
+    const pendingTimestampsKey = React.useMemo(
+        () =>
+            history
+                .filter((item) => item.status === 'pending')
+                .map((item) => item.timestamp)
+                .sort((left, right) => left - right)
+                .join(','),
+        [history]
+    );
 
     React.useEffect(() => {
         if (effectiveStorageModeClient !== 'fs') {
@@ -80,9 +89,9 @@ export default function HistoryPage() {
                     params.set('passwordHash', clientPasswordHash);
                 }
 
-                const pendingTimestamps = history
-                    .filter((item) => item.status === 'pending')
-                    .map((item) => item.timestamp);
+                const pendingTimestamps = pendingTimestampsKey
+                    ? pendingTimestampsKey.split(',').map((value) => Number.parseInt(value, 10)).filter(Number.isFinite)
+                    : [];
                 params.set('page_size', hasPendingHistory ? '1000' : '100');
                 if (pendingTimestamps.length > 0) {
                     params.set('since', Math.min(...pendingTimestamps).toString());
@@ -146,7 +155,15 @@ export default function HistoryPage() {
             if (intervalId) window.clearInterval(intervalId);
             controller.abort();
         };
-    }, [authMode, clientPasswordHash, hasPendingHistory, history, isAuthReady, isPasswordRequiredByBackend, setHistory]);
+    }, [
+        authMode,
+        clientPasswordHash,
+        hasPendingHistory,
+        isAuthReady,
+        isPasswordRequiredByBackend,
+        pendingTimestampsKey,
+        setHistory
+    ]);
 
     const displayedHistory = React.useMemo(() => {
         const serverHistoryByTimestamp = new Map(serverHistory.map((item) => [item.timestamp, item]));

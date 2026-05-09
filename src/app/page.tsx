@@ -244,8 +244,8 @@ export default function HomePage() {
     const [genCustomWidth, setGenCustomWidth] = React.useState<number>(1024);
     const [genCustomHeight, setGenCustomHeight] = React.useState<number>(1024);
     const [genQuality, setGenQuality] = React.useState<GenerationFormData['quality']>('auto');
-    const [genOutputFormat, setGenOutputFormat] = React.useState<GenerationFormData['output_format']>('png');
-    const [genCompression, setGenCompression] = React.useState([100]);
+    const [genOutputFormat, setGenOutputFormat] = React.useState<GenerationFormData['output_format']>('webp');
+    const [genCompression, setGenCompression] = React.useState([85]);
     const [genBackground, setGenBackground] = React.useState<GenerationFormData['background']>('auto');
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
     const [genStreamEnabled, setGenStreamEnabled] = React.useState(false);
@@ -457,32 +457,20 @@ export default function HomePage() {
 
     const cacheApiImageForDisplay = React.useCallback(async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
         if (img.b64_json) {
+            const actualMimeType = getMimeTypeFromFormat(img.output_format);
+            const immediatePath = `data:${actualMimeType};base64,${img.b64_json}`;
+
             try {
-                const byteCharacters = atob(img.b64_json);
-                const byteNumbers = new Array(byteCharacters.length);
-                for (let i = 0; i < byteCharacters.length; i++) {
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                }
-                const byteArray = new Uint8Array(byteNumbers);
-
-                const actualMimeType = getMimeTypeFromFormat(img.output_format);
-                const blob = new Blob([byteArray], { type: actualMimeType });
-
-                await db.images.put({ userId: activeImageUserId ?? LEGACY_IMAGE_USER_ID, filename: img.filename, blob });
-
-                const previousBlobUrl = blobUrlCacheRef.current.get(img.filename);
-                if (previousBlobUrl) {
-                    URL.revokeObjectURL(previousBlobUrl);
-                }
-
-                const blobUrl = URL.createObjectURL(blob);
-                blobUrlCacheRef.current.set(img.filename, blobUrl);
-
-                return {
-                    filename: img.filename,
-                    path: blobUrl,
-                    revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
-                };
+                void (async () => {
+                    const byteCharacters = atob(img.b64_json!);
+                    const byteNumbers = new Array(byteCharacters.length);
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                    }
+                    const byteArray = new Uint8Array(byteNumbers);
+                    const blob = new Blob([byteArray], { type: actualMimeType });
+                    await db.images.put({ userId: activeImageUserId ?? LEGACY_IMAGE_USER_ID, filename: img.filename, blob });
+                })();
             } catch (dbError) {
                 console.error(`Error caching blob ${img.filename} to IndexedDB:`, dbError);
                 if (effectiveStorageModeClient === 'indexeddb') {
@@ -490,6 +478,12 @@ export default function HomePage() {
                     return null;
                 }
             }
+
+            return {
+                filename: img.filename,
+                path: immediatePath,
+                revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
+            };
         } else {
             console.warn(`Image ${img.filename} missing b64_json; falling back to server path when available.`);
         }
@@ -898,6 +892,7 @@ export default function HomePage() {
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let hasSavedStreamingHistory = false;
+                let shouldStopReading = false;
                 const streamedImages: Array<ApiImageResponseItem | undefined> = [];
                 let streamingPartialImages = 0;
                 let streamingCompletedImages = 0;
@@ -1075,8 +1070,22 @@ export default function HomePage() {
                                 const event = JSON.parse(jsonStr);
 
                                 if (event.type === 'partial_image') {
-                                    // Streaming previews are intentionally hidden in the UI.
                                     streamingPartialImages += 1;
+                                    if (event.b64_json) {
+                                        const partialImage = normalizeStreamingImage({
+                                            filename: `partial-${startTime}-${typeof event.index === 'number' ? event.index : 0}.webp`,
+                                            b64_json: event.b64_json,
+                                            output_format: fallbackOutputFormat
+                                        });
+
+                                        if (partialImage) {
+                                            const imageIndex =
+                                                typeof event.index === 'number' ? event.index : streamedImages.length;
+                                            streamedImages[imageIndex] = partialImage;
+                                            streamedImagesForRecovery = getOrderedStreamedImages();
+                                            await displayStreamingImages();
+                                        }
+                                    }
                                     updateStreamingStats();
                                     continue;
                                 } else if (event.type === 'error') {
@@ -1098,6 +1107,12 @@ export default function HomePage() {
                                         streamingCompletedImages += 1;
                                         updateStreamingStats();
                                         await displayStreamingImages();
+
+                                        if (requestImageCount === 1 && !hasSavedStreamingHistory) {
+                                            await finalizeStreamingImages([completedImage], event.revised_prompt);
+                                            shouldStopReading = true;
+                                            break;
+                                        }
                                     }
                                 } else if (event.type === 'done') {
                                     streamingDoneReceived = true;
@@ -1111,12 +1126,23 @@ export default function HomePage() {
                                         : [];
 
                                     await finalizeStreamingImages(eventImages, event.revised_prompt, event.usage);
+                                    shouldStopReading = true;
+                                    break;
                                 }
                             } catch (parseError) {
                                 console.error('Error parsing SSE event:', parseError);
                                 throw parseError;
                             }
                         }
+                    }
+
+                    if (shouldStopReading) {
+                        try {
+                            await reader.cancel();
+                        } catch (cancelError) {
+                            console.warn('Failed to cancel SSE reader after streaming completion:', cancelError);
+                        }
+                        break;
                     }
                 }
 

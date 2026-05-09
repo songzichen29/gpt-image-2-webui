@@ -1,4 +1,5 @@
-﻿import fs from 'fs/promises';
+import { createReadStream } from 'fs';
+import fs from 'fs/promises';
 import { lookup } from 'mime-types';
 import { NextRequest, NextResponse } from 'next/server';
 import { getImageFilePath, isValidImageFilename } from '@/lib/server/image-storage';
@@ -24,17 +25,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const filepath = getImageFilePath(filename, image2UserId);
 
     try {
-        await fs.access(filepath);
-
-        const fileBuffer = await fs.readFile(filepath);
+        const fileStats = await fs.stat(filepath);
 
         const contentType = lookup(filename) || 'application/octet-stream';
+        const fileStream = createReadStream(filepath);
 
-        return new NextResponse(fileBuffer, {
+        return new NextResponse(fileStream as unknown as ReadableStream, {
             status: 200,
             headers: {
                 'Content-Type': contentType,
-                'Content-Length': fileBuffer.length.toString(),
+                'Content-Length': fileStats.size.toString(),
                 'Cache-Control': 'private, max-age=31536000, immutable'
             }
         });

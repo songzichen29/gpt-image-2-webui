@@ -117,7 +117,64 @@ export function ImageOutput({
             />
             <div className='relative flex h-full w-full flex-grow items-center justify-center overflow-hidden'>
                 {isLoading ? (
-                    currentMode === 'edit' && baseImagePreviewUrl ? (
+                    imageBatch && imageBatch.length > 0 ? (
+                        viewMode === 'grid' ? (
+                            <div
+                                className={`grid ${getGridColsClass(imageBatch.length)} max-h-full w-full max-w-full gap-1 p-1 opacity-95`}>
+                                {imageBatch.map((img, index) => (
+                                    <div
+                                        key={img.filename}
+                                        className='relative aspect-square overflow-hidden rounded border border-white/10'>
+                                        <button
+                                            type='button'
+                                            className='relative h-full w-full cursor-zoom-in'
+                                            onClick={() => openPreview(img, index)}
+                                            aria-label={t('output.previewImageAria', { filename: img.filename })}>
+                                            <Image
+                                                src={img.path}
+                                                alt={t('output.generatedGridAlt', { index: index + 1 })}
+                                                fill
+                                                style={{ objectFit: 'contain' }}
+                                                sizes='(max-width: 768px) 50vw, (max-width: 1024px) 33vw, 25vw'
+                                                unoptimized
+                                            />
+                                        </button>
+                                    </div>
+                                ))}
+                                <div className='pointer-events-none absolute inset-x-0 top-2 flex justify-center'>
+                                    <div className='rounded-full bg-black/70 px-3 py-1 text-xs text-white/85'>
+                                        {currentMode === 'edit' ? t('output.editing') : t('output.generating')} · {elapsedLabel}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : imageBatch[viewMode] ? (
+                            <div className='relative flex h-full w-full items-center justify-center'>
+                                <button
+                                    type='button'
+                                    className='flex h-full w-full cursor-zoom-in items-center justify-center'
+                                    onClick={() => openPreview(imageBatch[viewMode])}
+                                    aria-label={t('output.previewImageAria', { filename: imageBatch[viewMode].filename })}>
+                                    <Image
+                                        src={imageBatch[viewMode].path}
+                                        alt={altText}
+                                        width={512}
+                                        height={512}
+                                        className='max-h-full max-w-full object-contain'
+                                        unoptimized
+                                    />
+                                </button>
+                                <div className='pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white/85'>
+                                    {currentMode === 'edit' ? t('output.editing') : t('output.generating')} · {elapsedLabel}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className='flex flex-col items-center justify-center text-slate-500 dark:text-white/60'>
+                                <Loader2 className='mb-2 h-8 w-8 animate-spin' />
+                                <p>{t('output.generating')}</p>
+                                <p className='mt-1 text-sm text-white/50'>{elapsedLabel}</p>
+                            </div>
+                        )
+                    ) : currentMode === 'edit' && baseImagePreviewUrl ? (
                         <div className='relative flex h-full w-full items-center justify-center'>
                             <Image
                                 src={baseImagePreviewUrl}
