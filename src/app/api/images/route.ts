@@ -27,17 +27,34 @@ type StreamingEvent = {
     path?: string;
     output_format?: string;
     usage?: OpenAI.Images.ImagesResponse['usage'];
+    revised_prompt?: string;
     images?: Array<{
         filename: string;
         b64_json?: string;
         path?: string;
         output_format: string;
+        revised_prompt?: string;
     }>;
     error?: string;
 };
 
+type ApiImageResponseItem = {
+    filename: string;
+    b64_json: string;
+    path?: string;
+    output_format: string;
+    revised_prompt?: string;
+};
+
+type ImageApiResponseBody = {
+    images: ApiImageResponseItem[];
+    revised_prompt?: string;
+    usage?: OpenAI.Images.ImagesResponse['usage'];
+};
+
 type PersistedHistoryImage = {
     filename: string;
+    revisedPrompt?: string;
 };
 
 type PersistedHistoryMetadata = {
@@ -50,6 +67,7 @@ type PersistedHistoryMetadata = {
     background: 'auto' | 'transparent' | 'opaque';
     moderation: 'auto' | 'low';
     prompt: string;
+    revisedPrompt?: string;
     mode: 'generate' | 'edit';
     costDetails: {
         estimated_cost_usd: number;
@@ -328,6 +346,26 @@ function getOutputMimeType(format: ValidOutputFormat): string {
     }
 }
 
+function detectImageFormat(buffer: Buffer): ValidOutputFormat | null {
+    if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+        return 'png';
+    }
+
+    if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+        return 'jpeg';
+    }
+
+    if (
+        buffer.length >= 12 &&
+        buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+        buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+    ) {
+        return 'webp';
+    }
+
+    return null;
+}
+
 function mergeNumericUsageValue(left: unknown, right: unknown): unknown {
     if (typeof left === 'number' && typeof right === 'number') {
         return left + right;
@@ -421,6 +459,16 @@ function getStreamEventB64Json(event: unknown): string | undefined {
     const b64Json = (event as ImageStreamEventLike).b64_json;
 
     return typeof b64Json === 'string' && b64Json ? b64Json : undefined;
+}
+
+function getRevisedPrompt(source: unknown): string | undefined {
+    if (!source || typeof source !== 'object' || !('revised_prompt' in source)) {
+        return undefined;
+    }
+
+    const revisedPrompt = source.revised_prompt;
+
+    return typeof revisedPrompt === 'string' && revisedPrompt.trim() ? revisedPrompt : undefined;
 }
 
 function getStreamEventUsage(event: unknown): OpenAI.Images.ImagesResponse['usage'] | undefined {
@@ -566,9 +614,235 @@ async function persistMinioHistoryMetadata(metadata: PersistedHistoryMetadata, u
     await uploadJsonToMinio(getImageHistoryObjectKey(metadata.timestamp, userId), metadata);
 }
 
+async function persistImageApiResult({
+    effectiveStorageMode,
+    historyBackground,
+    historyHasMask,
+    historyModeration,
+    historyOutputCompression,
+    historyOutputFormat,
+    historyQuality,
+    historySize,
+    historySourceImageCount,
+    image2UserId,
+    mode,
+    model,
+    prompt,
+    requestTimestamp,
+    result,
+    streaming
+}: {
+    effectiveStorageMode: 'fs' | 'indexeddb' | 'minio';
+    historyBackground: PersistedHistoryMetadata['background'];
+    historyHasMask: boolean;
+    historyModeration: PersistedHistoryMetadata['moderation'];
+    historyOutputCompression: number | undefined;
+    historyOutputFormat: PersistedHistoryMetadata['output_format'];
+    historyQuality: PersistedHistoryMetadata['quality'];
+    historySize: string | undefined;
+    historySourceImageCount: number;
+    image2UserId: number | undefined;
+    mode: 'generate' | 'edit';
+    model: OpenAI.Images.ImageGenerateParams['model'] | OpenAI.Images.ImageEditParams['model'];
+    prompt: string;
+    requestTimestamp: number;
+    result: OpenAI.Images.ImagesResponse;
+    streaming: boolean;
+}): Promise<ImageApiResponseBody> {
+    if (!result || !Array.isArray(result.data) || result.data.length === 0) {
+        console.error('Invalid or empty data received from OpenAI API:', result);
+        throw new Error('Failed to retrieve image data from API.');
+    }
+
+    const savedImagesData = await Promise.all(
+        result.data.map(async (imageData, index) => {
+            if (!imageData.b64_json) {
+                console.error(`Image data ${index} is missing b64_json.`);
+                throw new Error(`Image data at index ${index} is missing base64 data.`);
+            }
+
+            const buffer = Buffer.from(imageData.b64_json, 'base64');
+            const detectedFormat = detectImageFormat(buffer);
+            const fileExtension = detectedFormat || historyOutputFormat || 'png';
+            const filename = `${requestTimestamp}-${index}.${fileExtension}`;
+            if (detectedFormat && historyOutputFormat && detectedFormat !== historyOutputFormat) {
+                console.warn('Image API returned bytes that do not match requested output format:', {
+                    requestedFormat: historyOutputFormat,
+                    detectedFormat,
+                    filename
+                });
+            }
+
+            if (effectiveStorageMode === 'fs') {
+                const filepath = getImageFilePath(filename, image2UserId);
+                console.log(`Attempting to save image to: ${filepath}`);
+                await fs.writeFile(filepath, buffer);
+                console.log(`Successfully saved image: ${filename}`);
+            } else if (effectiveStorageMode === 'minio') {
+                await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
+            }
+
+            const revisedPrompt = getRevisedPrompt(imageData);
+            const imageResult: ApiImageResponseItem = {
+                filename,
+                b64_json: imageData.b64_json,
+                output_format: fileExtension,
+                ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {})
+            };
+
+            if (effectiveStorageMode === 'fs') {
+                imageResult.path = `/api/image/${filename}`;
+            }
+
+            return imageResult;
+        })
+    );
+
+    console.log(`All images processed. Mode: ${effectiveStorageMode}`);
+
+    const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
+    const metadata: PersistedHistoryMetadata = {
+        timestamp: requestTimestamp,
+        images: savedImagesData.map((image) => ({
+            filename: image.filename,
+            ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+        })),
+        status: 'completed',
+        storageModeUsed: effectiveStorageMode === 'minio' ? 'minio' : 'fs',
+        durationMs: Math.max(0, Date.now() - requestTimestamp),
+        quality: historyQuality,
+        background: historyBackground,
+        moderation: historyModeration,
+        prompt,
+        ...(revisedPrompt ? { revisedPrompt } : {}),
+        mode,
+        costDetails: toCostDetails(result.usage),
+        size: historySize,
+        output_compression: historyOutputCompression,
+        streaming,
+        partialImages: undefined,
+        sourceImageCount: historySourceImageCount,
+        hasMask: historyHasMask,
+        output_format: historyOutputFormat,
+        model: String(model)
+    };
+
+    if (effectiveStorageMode === 'fs') {
+        await persistFsHistoryMetadata(metadata, image2UserId);
+    } else if (effectiveStorageMode === 'minio') {
+        await persistMinioHistoryMetadata(metadata, image2UserId);
+    }
+
+    return {
+        images: savedImagesData,
+        ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
+        usage: result.usage
+    };
+}
+
+function createSseImageResponse(run: (send: (data: StreamingEvent) => boolean) => Promise<void>) {
+    const encoder = new TextEncoder();
+
+    const readableStream = new ReadableStream({
+        async start(controller) {
+            let streamClosed = false;
+            const safeClose = () => {
+                if (streamClosed) return;
+                streamClosed = true;
+                try {
+                    controller.close();
+                } catch {}
+            };
+            const safeEnqueueComment = (comment: string) => {
+                if (streamClosed) return false;
+                try {
+                    enqueueSseComment(controller, encoder, comment);
+                    return true;
+                } catch (error) {
+                    if (isClosedControllerError(error)) {
+                        streamClosed = true;
+                        return false;
+                    }
+                    throw error;
+                }
+            };
+            const safeEnqueueData = (data: StreamingEvent) => {
+                if (streamClosed) return false;
+                try {
+                    enqueueSseData(controller, encoder, data);
+                    return true;
+                } catch (error) {
+                    if (isClosedControllerError(error)) {
+                        streamClosed = true;
+                        return false;
+                    }
+                    throw error;
+                }
+            };
+
+            safeEnqueueComment('connected');
+            const heartbeat = setInterval(() => {
+                try {
+                    if (!safeEnqueueComment('keep-alive')) {
+                        clearInterval(heartbeat);
+                    }
+                } catch {
+                    clearInterval(heartbeat);
+                }
+            }, SSE_HEARTBEAT_INTERVAL_MS);
+
+            try {
+                await run(safeEnqueueData);
+            } catch (error) {
+                console.error('SSE image response error:', error);
+                safeEnqueueData({
+                    type: 'error',
+                    error: error instanceof Error ? error.message : 'Image request failed'
+                });
+            } finally {
+                clearInterval(heartbeat);
+                safeClose();
+            }
+        }
+    });
+
+    return new Response(readableStream, {
+        headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    });
+}
+
+function sendImageApiResponseEvents(send: (data: StreamingEvent) => boolean, body: ImageApiResponseBody) {
+    for (const [index, image] of body.images.entries()) {
+        if (
+            !send({
+                type: 'completed',
+                index,
+                filename: image.filename,
+                b64_json: image.b64_json,
+                path: image.path,
+                output_format: image.output_format,
+                revised_prompt: image.revised_prompt
+            })
+        ) {
+            return;
+        }
+    }
+
+    send({
+        type: 'done',
+        images: body.images,
+        revised_prompt: body.revised_prompt,
+        usage: body.usage
+    });
+}
+
 export async function POST(request: NextRequest) {
     const serverRequestId = crypto.randomUUID();
-    let releaseInFlightImageRequest: (() => void) | null = null;
     console.log('Received POST request to /api/images:', { serverRequestId });
 
     try {
@@ -1096,9 +1370,35 @@ export async function POST(request: NextRequest) {
             if (!requestLock.acquired) {
                 return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
             }
-            releaseInFlightImageRequest = requestLock.release;
             console.log('Calling OpenAI generate with params:', params);
-            result = await openai.images.generate(params);
+            return createSseImageResponse(async (send) => {
+                try {
+                    result = await openai.images.generate(params);
+                    console.log('OpenAI API call successful.');
+                    result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
+                    const responseBody = await persistImageApiResult({
+                        effectiveStorageMode,
+                        historyBackground,
+                        historyHasMask,
+                        historyModeration,
+                        historyOutputCompression,
+                        historyOutputFormat,
+                        historyQuality,
+                        historySize,
+                        historySourceImageCount,
+                        image2UserId,
+                        mode: 'generate',
+                        model,
+                        prompt,
+                        requestTimestamp,
+                        result,
+                        streaming: false
+                    });
+                    sendImageApiResponseEvents(send, responseBody);
+                } finally {
+                    requestLock.release();
+                }
+            });
         } else if (mode === 'edit') {
             const n = parseInt((formData.get('n') as string) || '1', 10);
             requestedImageCount = Math.max(1, Math.min(n || 1, 10));
@@ -1529,131 +1829,50 @@ export async function POST(request: NextRequest) {
             if (!requestLock.acquired) {
                 return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
             }
-            releaseInFlightImageRequest = requestLock.release;
-            await persistEditSourceFilesToMinio();
+            try {
+                await persistEditSourceFilesToMinio();
+            } catch (error) {
+                requestLock.release();
+                throw error;
+            }
 
             console.log('Calling OpenAI edit with params:', {
                 ...params,
                 image: `[${imageFiles.map((f) => f.name).join(', ')}]`,
                 mask: maskFile ? maskFile.name : 'N/A'
             });
-            result = await openai.images.edit(params);
+            return createSseImageResponse(async (send) => {
+                try {
+                    result = await openai.images.edit(params);
+                    console.log('OpenAI API call successful.');
+                    result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
+                    const responseBody = await persistImageApiResult({
+                        effectiveStorageMode,
+                        historyBackground,
+                        historyHasMask,
+                        historyModeration,
+                        historyOutputCompression,
+                        historyOutputFormat,
+                        historyQuality,
+                        historySize,
+                        historySourceImageCount,
+                        image2UserId,
+                        mode: 'edit',
+                        model,
+                        prompt,
+                        requestTimestamp,
+                        result,
+                        streaming: false
+                    });
+                    sendImageApiResponseEvents(send, responseBody);
+                } finally {
+                    requestLock.release();
+                }
+            });
         } else {
             return NextResponse.json({ error: 'Invalid mode specified' }, { status: 400 });
         }
 
-        console.log('OpenAI API call successful.');
-
-        result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
-
-        if (!result || !Array.isArray(result.data) || result.data.length === 0) {
-            console.error('Invalid or empty data received from OpenAI API:', result);
-            return NextResponse.json({ error: 'Failed to retrieve image data from API.' }, { status: 500 });
-        }
-
-        const savedImagesData = await Promise.all(
-            result.data.map(async (imageData, index) => {
-                if (!imageData.b64_json) {
-                    console.error(`Image data ${index} is missing b64_json.`);
-                    throw new Error(`Image data at index ${index} is missing base64 data.`);
-                }
-                const buffer = Buffer.from(imageData.b64_json, 'base64');
-                const timestamp = requestTimestamp;
-
-                const fileExtension = validateOutputFormat(formData.get('output_format'));
-                const filename = `${timestamp}-${index}.${fileExtension}`;
-
-                if (effectiveStorageMode === 'fs') {
-                    const filepath = getImageFilePath(filename, image2UserId);
-                    console.log(`Attempting to save image to: ${filepath}`);
-                    await fs.writeFile(filepath, buffer);
-                    console.log(`Successfully saved image: ${filename}`);
-                } else if (effectiveStorageMode === 'minio') {
-                    await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
-                } else {
-                }
-
-                const imageResult: {
-                    filename: string;
-                    b64_json: string;
-                    path?: string;
-                    output_format: string;
-                } = {
-                    filename: filename,
-                    b64_json: imageData.b64_json,
-                    output_format: fileExtension
-                };
-
-                if (effectiveStorageMode === 'fs') {
-                    imageResult.path = `/api/image/${filename}`;
-                }
-
-                return imageResult;
-            })
-        );
-
-        console.log(`All images processed. Mode: ${effectiveStorageMode}`);
-
-        if (effectiveStorageMode === 'fs') {
-            await persistFsHistoryMetadata(
-                {
-                    timestamp: requestTimestamp,
-                    images: savedImagesData.map((image) => ({
-                        filename: image.filename
-                    })),
-                    status: 'completed',
-                    storageModeUsed: 'fs',
-                    durationMs: Math.max(0, Date.now() - requestTimestamp),
-                    quality: historyQuality,
-                    background: historyBackground,
-                    moderation: historyModeration,
-                    prompt,
-                    mode,
-                    costDetails: toCostDetails(result.usage),
-                    size: historySize,
-                    output_compression: historyOutputCompression,
-                    streaming: false,
-                    partialImages: undefined,
-                    sourceImageCount: historySourceImageCount,
-                    hasMask: historyHasMask,
-                    output_format: historyOutputFormat,
-                    model: String(model)
-                },
-                image2UserId
-            );
-        } else if (effectiveStorageMode === 'minio') {
-            await persistMinioHistoryMetadata(
-                {
-                    timestamp: requestTimestamp,
-                    images: savedImagesData.map((image) => ({
-                        filename: image.filename
-                    })),
-                    status: 'completed',
-                    storageModeUsed: 'minio',
-                    durationMs: Math.max(0, Date.now() - requestTimestamp),
-                    quality: historyQuality,
-                    background: historyBackground,
-                    moderation: historyModeration,
-                    prompt,
-                    mode,
-                    costDetails: toCostDetails(result.usage),
-                    size: historySize,
-                    output_compression: historyOutputCompression,
-                    streaming: false,
-                    partialImages: undefined,
-                    sourceImageCount: historySourceImageCount,
-                    hasMask: historyHasMask,
-                    output_format: historyOutputFormat,
-                    model: String(model)
-                },
-                image2UserId
-            );
-        }
-
-        return NextResponse.json({
-            images: savedImagesData,
-            usage: result.usage
-        });
     } catch (error: unknown) {
         console.error('Error in /api/images:', error);
 
@@ -1675,7 +1894,5 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({ error: errorMessage }, { status });
-    } finally {
-        releaseInFlightImageRequest?.();
     }
 }
