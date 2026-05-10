@@ -41,7 +41,7 @@ type StreamingEvent = {
 
 type ApiImageResponseItem = {
     filename: string;
-    b64_json: string;
+    b64_json?: string;
     path?: string;
     output_format: string;
     revised_prompt?: string;
@@ -684,16 +684,18 @@ async function persistImageApiResult({
             }
 
             const revisedPrompt = getRevisedPrompt(imageData);
+            const imagePath =
+                effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
+                    ? buildApiImageUrl(filename, requestTimestamp)
+                    : undefined;
+            const shouldInlineImageData = effectiveStorageMode === 'indexeddb';
             const imageResult: ApiImageResponseItem = {
                 filename,
-                b64_json: imageData.b64_json,
                 output_format: fileExtension,
+                ...(shouldInlineImageData ? { b64_json: imageData.b64_json } : {}),
+                ...(imagePath ? { path: imagePath } : {}),
                 ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {})
             };
-
-            if (effectiveStorageMode === 'fs') {
-                imageResult.path = buildApiImageUrl(filename, requestTimestamp);
-            }
 
             return imageResult;
         })
@@ -1049,7 +1051,7 @@ export async function POST(request: NextRequest) {
                 const encoder = new TextEncoder();
                 const timestamp = requestTimestamp;
                 const fileExtension = validateOutputFormat(output_format);
-                const shouldInlineImageData = true;
+                const shouldInlineImageData = effectiveStorageMode === 'indexeddb';
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
@@ -1173,7 +1175,7 @@ export async function POST(request: NextRequest) {
                                     }
 
                                     const savedPath =
-                                        effectiveStorageMode === 'fs' && b64Json
+                                        effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
                                             ? buildApiImageUrl(filename, timestamp)
                                             : undefined;
                                     const imageData = {
@@ -1219,7 +1221,10 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath = effectiveStorageMode === 'fs' ? buildApiImageUrl(filename, timestamp) : undefined;
+                                const savedPath =
+                                    effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
+                                        ? buildApiImageUrl(filename, timestamp)
+                                        : undefined;
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,
@@ -1518,7 +1523,7 @@ export async function POST(request: NextRequest) {
                 const encoder = new TextEncoder();
                 const timestamp = requestTimestamp;
                 const fileExtension = 'png'; // Edit mode always outputs PNG
-                const shouldInlineImageData = true;
+                const shouldInlineImageData = effectiveStorageMode === 'indexeddb';
 
                 const readableStream = new ReadableStream({
                     async start(controller) {
@@ -1642,7 +1647,7 @@ export async function POST(request: NextRequest) {
                                     }
 
                                     const savedPath =
-                                        effectiveStorageMode === 'fs' && b64Json
+                                        effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
                                             ? buildApiImageUrl(filename, timestamp)
                                             : undefined;
                                     const imageData = {
@@ -1688,7 +1693,10 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath = effectiveStorageMode === 'fs' ? buildApiImageUrl(filename, timestamp) : undefined;
+                                const savedPath =
+                                    effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
+                                        ? buildApiImageUrl(filename, timestamp)
+                                        : undefined;
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,

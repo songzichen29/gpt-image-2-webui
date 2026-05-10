@@ -87,7 +87,7 @@ console.log(
 type ApiImageResponseItem = {
     filename: string;
     b64_json?: string;
-    output_format: string;
+    output_format?: string;
     path?: string;
 };
 
@@ -478,7 +478,12 @@ export default function HomePage() {
 
     const cacheApiImageForDisplay = React.useCallback(async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
         if (img.b64_json) {
-            const actualMimeType = getMimeTypeFromFormat(img.output_format);
+            const fallbackOutputFormat = img.filename.toLowerCase().endsWith('.webp')
+                ? 'webp'
+                : img.filename.toLowerCase().match(/\.jpe?g$/)
+                  ? 'jpeg'
+                  : 'png';
+            const actualMimeType = getMimeTypeFromFormat(img.output_format || fallbackOutputFormat);
             const immediatePath = `data:${actualMimeType};base64,${img.b64_json}`;
 
             try {
