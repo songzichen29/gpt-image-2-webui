@@ -184,27 +184,38 @@ async function loadFsHistory(request: NextRequest, image2UserId?: number): Promi
     );
 }
 
-async function loadMinioHistory(request: NextRequest, image2UserId?: number): Promise<ImageHistoryItem[]> {
+type MinioHistoryPage = {
+    items: ImageHistoryItem[];
+    total: number;
+};
+
+async function loadMinioHistoryPage(request: NextRequest, page: number, pageSize: number, image2UserId?: number): Promise<MinioHistoryPage> {
     const since = getSinceTimestamp(request);
     const sortOrder = getSortOrder(request);
     const prefix = image2UserId ? `${image2UserId}/.history/` : 'legacy/.history/';
     const names = await listMinioObjectNames(prefix);
-    const history: ImageHistoryItem[] = [];
+    const orderedObjects = names
+        .map((name) => {
+            const fileName = name.split('/').pop() ?? '';
+            const timestamp = Number.parseInt(fileName.replace(/\.json$/i, ''), 10);
 
-    for (const name of names) {
-        const fileName = name.split('/').pop() ?? '';
-        const timestamp = Number.parseInt(fileName.replace(/\.json$/i, ''), 10);
-        if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
-        if (since !== null && timestamp < since) continue;
+            return { name, timestamp };
+        })
+        .filter(({ timestamp }) => Number.isFinite(timestamp) && timestamp > 0 && (since === null || timestamp >= since))
+        .sort((left, right) => (sortOrder === 'asc' ? left.timestamp - right.timestamp : right.timestamp - left.timestamp));
+    const selectedObjects = orderedObjects.slice((page - 1) * pageSize, page * pageSize);
+    const items: ImageHistoryItem[] = [];
+
+    for (const { name, timestamp } of selectedObjects) {
         try {
             const metadata = normalizeHistoryItem(await readJsonFromMinio<unknown>(name), timestamp);
-            if (metadata) history.push(metadata);
+            if (metadata) items.push(metadata);
         } catch (error) {
             console.warn(`Failed to read MinIO history metadata ${name}:`, error);
         }
     }
 
-    return history.sort((left, right) => (sortOrder === 'asc' ? left.timestamp - right.timestamp : right.timestamp - left.timestamp));
+    return { items, total: orderedObjects.length };
 }
 
 export async function GET(request: NextRequest) {
@@ -226,7 +237,12 @@ export async function GET(request: NextRequest) {
     try {
         const { page, pageSize } = getPaginationParams(request);
         const storageMode = getImageStorageMode();
-        const history = storageMode === 'minio' ? await loadMinioHistory(request, image2UserId) : await loadFsHistory(request, image2UserId);
+        if (storageMode === 'minio') {
+            const { items, total } = await loadMinioHistoryPage(request, page, pageSize, image2UserId);
+            return paginatedResponse(items, total, page, pageSize);
+        }
+
+        const history = await loadFsHistory(request, image2UserId);
         const total = history.length;
         const start = (page - 1) * pageSize;
         const items = history.slice(start, start + pageSize);
