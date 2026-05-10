@@ -29,7 +29,6 @@ import * as React from 'react';
 
 type HistoryImage = {
     filename: string;
-    revisedPrompt?: string;
 };
 
 export type HistoryMetadata = {
@@ -43,7 +42,6 @@ export type HistoryMetadata = {
     background: GenerationFormData['background'];
     moderation: GenerationFormData['moderation'];
     prompt: string;
-    revisedPrompt?: string;
     mode: 'generate' | 'edit';
     costDetails: CostDetails | null;
     size?: string;
@@ -91,20 +89,17 @@ type ApiImageResponseItem = {
     b64_json?: string;
     output_format: string;
     path?: string;
-    revised_prompt?: string;
 };
 
 type ImageBatchItem = {
     path: string;
     filename: string;
-    revisedPrompt?: string;
 };
 
 type ApiUsageForCost = Parameters<typeof calculateApiCost>[0];
 
 type ImageApiResult = {
     images?: ApiImageResponseItem[];
-    revised_prompt?: string;
     usage?: ApiUsageForCost;
     error?: string;
     loginUrl?: string;
@@ -282,17 +277,6 @@ export default function HomePage() {
         setGenModeration('auto');
         setGenStreamEnabled(false);
     };
-
-    const normalizeRevisedPrompt = React.useCallback((value: unknown): string | undefined => {
-        return typeof value === 'string' && value.trim() ? value : undefined;
-    }, []);
-
-    const getBatchRevisedPrompt = React.useCallback(
-        (images: ApiImageResponseItem[], fallback?: unknown): string | undefined =>
-            normalizeRevisedPrompt(fallback) ??
-            images.map((image) => normalizeRevisedPrompt(image.revised_prompt)).find(Boolean),
-        [normalizeRevisedPrompt]
-    );
 
     React.useEffect(() => {
         setIsThemeMounted(true);
@@ -484,8 +468,7 @@ export default function HomePage() {
 
             return {
                 filename: img.filename,
-                path: immediatePath,
-                revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
+                path: immediatePath
             };
         } else {
             console.warn(`Image ${img.filename} missing b64_json; falling back to server path when available.`);
@@ -494,13 +477,12 @@ export default function HomePage() {
         if (img.path) {
             return {
                 filename: img.filename,
-                path: img.path,
-                revisedPrompt: normalizeRevisedPrompt(img.revised_prompt)
+                path: img.path
             };
         }
 
         return null;
-    }, [activeImageUserId, normalizeRevisedPrompt, t]);
+    }, [activeImageUserId, t]);
 
     const getOutputFormatFromFilename = React.useCallback((filename: string): GenerationFormData['output_format'] => {
         const extension = filename.split('.').pop()?.toLowerCase();
@@ -531,8 +513,7 @@ export default function HomePage() {
             item.images.map((image) => ({
                 filename: image.filename,
                 output_format: item.output_format || getOutputFormatFromFilename(image.filename),
-                path: `/api/image/${image.filename}`,
-                ...(image.revisedPrompt ? { revised_prompt: image.revisedPrompt } : {})
+                path: `/api/image/${image.filename}`
             }));
 
         const restoreCompletedEntry = async (item: HistoryMetadata) => {
@@ -874,7 +855,7 @@ export default function HomePage() {
 
         let streamedImagesForRecovery: ApiImageResponseItem[] = [];
         let finalizeStreamingImagesForRecovery:
-            | ((images: ApiImageResponseItem[], revisedPromptFallback?: unknown, usage?: ApiUsageForCost) => Promise<void>)
+            | ((images: ApiImageResponseItem[], usage?: ApiUsageForCost) => Promise<void>)
             | null = null;
 
         try {
@@ -959,18 +940,11 @@ export default function HomePage() {
                         filename: image.filename,
                         output_format: image.output_format || fallbackOutputFormat,
                         ...(image.b64_json ? { b64_json: image.b64_json } : {}),
-                        ...(image.path ? { path: image.path } : {}),
-                        ...(normalizeRevisedPrompt(image.revised_prompt)
-                            ? { revised_prompt: normalizeRevisedPrompt(image.revised_prompt) }
-                            : {})
+                        ...(image.path ? { path: image.path } : {})
                     };
                 };
 
-                const finalizeStreamingImages = async (
-                    images: ApiImageResponseItem[],
-                    revisedPromptFallback?: unknown,
-                    usage?: ApiUsageForCost
-                ) => {
+                const finalizeStreamingImages = async (images: ApiImageResponseItem[], usage?: ApiUsageForCost) => {
                     finalizeStreamingImagesForRecovery = finalizeStreamingImages;
                     streamedImagesForRecovery = getOrderedStreamedImages();
 
@@ -1001,7 +975,6 @@ export default function HomePage() {
                         historyQuality = editData.quality;
                     }
 
-                    const revisedPrompt = getBatchRevisedPrompt(finalImages, revisedPromptFallback);
                     const costDetails = calculateApiCost(usage, requestModel);
 
                     setApiResponseInfo((current) =>
@@ -1026,10 +999,7 @@ export default function HomePage() {
                     const newHistoryEntry: HistoryMetadata = {
                         timestamp: batchTimestamp,
                         images: finalImages.map((img) => ({
-                            filename: img.filename,
-                            ...(normalizeRevisedPrompt(img.revised_prompt)
-                                ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
-                                : {})
+                            filename: img.filename
                         })),
                         status: 'completed',
                         storageModeUsed: effectiveStorageModeClient,
@@ -1039,7 +1009,6 @@ export default function HomePage() {
                         moderation: historyModeration,
                         output_format: historyOutputFormat,
                         prompt: historyPrompt,
-                        revisedPrompt,
                         mode: mode,
                         costDetails: costDetails,
                         model: requestModel,
@@ -1111,8 +1080,7 @@ export default function HomePage() {
                                         filename: event.filename,
                                         b64_json: event.b64_json,
                                         output_format: event.output_format,
-                                        path: event.path,
-                                        revised_prompt: event.revised_prompt
+                                        path: event.path
                                     });
 
                                     if (completedImage) {
@@ -1139,7 +1107,7 @@ export default function HomePage() {
                                               .filter(Boolean) as ApiImageResponseItem[])
                                         : [];
 
-                                    await finalizeStreamingImages(eventImages, event.revised_prompt, event.usage);
+                                    await finalizeStreamingImages(eventImages, event.usage);
                                     shouldStopReading = true;
                                     break;
                                 }
@@ -1222,7 +1190,6 @@ export default function HomePage() {
                     historyPrompt = editData.prompt;
                 }
 
-                const revisedPrompt = getBatchRevisedPrompt(result.images, result.revised_prompt);
                 const costDetails = calculateApiCost(result.usage, requestModel);
                 setApiResponseInfo((current) =>
                     current
@@ -1241,10 +1208,7 @@ export default function HomePage() {
                 const newHistoryEntry: HistoryMetadata = {
                     timestamp: batchTimestamp,
                     images: result.images.map((img) => ({
-                        filename: img.filename,
-                        ...(normalizeRevisedPrompt(img.revised_prompt)
-                            ? { revisedPrompt: normalizeRevisedPrompt(img.revised_prompt) }
-                            : {})
+                        filename: img.filename
                     })),
                     status: 'completed',
                     storageModeUsed: effectiveStorageModeClient,
@@ -1254,7 +1218,6 @@ export default function HomePage() {
                     moderation: historyModeration,
                     output_format: historyOutputFormat,
                     prompt: historyPrompt,
-                    revisedPrompt,
                     mode: mode,
                     costDetails: costDetails,
                     model: requestModel,
@@ -1290,7 +1253,7 @@ export default function HomePage() {
             console.error(`API Call Error after ${durationMs}ms:`, err);
 
             const finalizeStreamingRecovery = finalizeStreamingImagesForRecovery as
-                | ((images: ApiImageResponseItem[], revisedPromptFallback?: unknown, usage?: ApiUsageForCost) => Promise<void>)
+                | ((images: ApiImageResponseItem[], usage?: ApiUsageForCost) => Promise<void>)
                 | null;
             if (requestStreaming && streamedImagesForRecovery.length > 0 && finalizeStreamingRecovery) {
                 try {

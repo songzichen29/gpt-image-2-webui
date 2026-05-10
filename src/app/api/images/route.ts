@@ -27,20 +27,17 @@ type StreamingEvent = {
     path?: string;
     output_format?: string;
     usage?: OpenAI.Images.ImagesResponse['usage'];
-    revised_prompt?: string;
     images?: Array<{
         filename: string;
         b64_json?: string;
         path?: string;
         output_format: string;
-        revised_prompt?: string;
     }>;
     error?: string;
 };
 
 type PersistedHistoryImage = {
     filename: string;
-    revisedPrompt?: string;
 };
 
 type PersistedHistoryMetadata = {
@@ -53,7 +50,6 @@ type PersistedHistoryMetadata = {
     background: 'auto' | 'transparent' | 'opaque';
     moderation: 'auto' | 'low';
     prompt: string;
-    revisedPrompt?: string;
     mode: 'generate' | 'edit';
     costDetails: {
         estimated_cost_usd: number;
@@ -115,9 +111,7 @@ function withAspectInstruction(
     const ratioText =
         width === height
             ? '1:1'
-            : width > height
-              ? `${Math.round(width / gcd(width, height))}:${Math.round(height / gcd(width, height))}`
-              : `${Math.round(width / gcd(width, height))}:${Math.round(height / gcd(width, height))}`;
+            : `${Math.round(width / gcd(width, height))}:${Math.round(height / gcd(width, height))}`;
 
     if (width > height) {
         const instruction = isChinese
@@ -184,16 +178,6 @@ function getOutputMimeType(format: ValidOutputFormat): string {
     }
 }
 
-function getRevisedPrompt(source: unknown): string | undefined {
-    if (!source || typeof source !== 'object' || !('revised_prompt' in source)) {
-        return undefined;
-    }
-
-    const revisedPrompt = source.revised_prompt;
-
-    return typeof revisedPrompt === 'string' && revisedPrompt.trim() ? revisedPrompt : undefined;
-}
-
 function mergeNumericUsageValue(left: unknown, right: unknown): unknown {
     if (typeof left === 'number' && typeof right === 'number') {
         return left + right;
@@ -224,7 +208,6 @@ type ImageStreamEventLike = {
     b64_json?: unknown;
     partial_image_index?: unknown;
     usage?: unknown;
-    revised_prompt?: unknown;
     item?: unknown;
     response?: unknown;
 };
@@ -288,19 +271,6 @@ function getStreamEventB64Json(event: unknown): string | undefined {
     const b64Json = (event as ImageStreamEventLike).b64_json;
 
     return typeof b64Json === 'string' && b64Json ? b64Json : undefined;
-}
-
-function getStreamEventRevisedPrompt(event: unknown): string | undefined {
-    if (event && typeof event === 'object' && 'revised_prompt' in event) {
-        const revisedPrompt = (event as ImageStreamEventLike).revised_prompt;
-        if (typeof revisedPrompt === 'string' && revisedPrompt.trim()) {
-            return revisedPrompt;
-        }
-    }
-
-    const payload = getImageGenerationCallPayloadFromStreamEvent(event);
-    const nestedPrompt = payload?.revised_prompt;
-    return typeof nestedPrompt === 'string' && nestedPrompt.trim() ? nestedPrompt : undefined;
 }
 
 function getStreamEventUsage(event: unknown): OpenAI.Images.ImagesResponse['usage'] | undefined {
@@ -552,11 +522,11 @@ export async function POST(request: NextRequest) {
                 (formData.get('background') as OpenAI.Images.ImageGenerateParams['background']) || 'auto';
             const moderation =
                 (formData.get('moderation') as OpenAI.Images.ImageGenerateParams['moderation']) || 'auto';
-            const promptWithAspectInstruction = withAspectInstruction(prompt, size, responseLanguage);
             historyQuality = quality;
             historyBackground = background;
             historyModeration = moderation;
             historySize = size ?? undefined;
+            const promptWithAspectInstruction = withAspectInstruction(prompt, size, responseLanguage);
             historyOutputFormat = validateOutputFormat(output_format);
 
             const baseParams = {
@@ -659,7 +629,6 @@ export async function POST(request: NextRequest) {
                                 b64_json?: string;
                                 path?: string;
                                 output_format: string;
-                                revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
@@ -714,7 +683,6 @@ export async function POST(request: NextRequest) {
 
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
-                                    const revisedPrompt = getStreamEventRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
@@ -735,7 +703,6 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         output_format: fileExtension,
                                         ...(shouldInlineImageData && b64Json ? { b64_json: b64Json } : {}),
-                                        ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
                                         ...(savedPath ? { path: savedPath } : {})
                                     };
                                     completedImages.push(imageData);
@@ -746,8 +713,7 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: shouldInlineImageData ? b64Json : undefined,
                                         path: savedPath,
-                                        output_format: fileExtension,
-                                        revised_prompt: revisedPrompt
+                                        output_format: fileExtension
                                     };
                                     if (!safeEnqueueData(completedEvent)) {
                                         break;
@@ -800,7 +766,6 @@ export async function POST(request: NextRequest) {
                             const doneEvent: StreamingEvent = {
                                 type: 'done',
                                 images: completedImages,
-                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
                             if (completedImages.length > 0) {
@@ -809,8 +774,7 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename,
-                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                                filename: image.filename
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'fs',
@@ -819,8 +783,6 @@ export async function POST(request: NextRequest) {
                                             background,
                                             moderation,
                                             prompt,
-                                            revisedPrompt:
-                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                             mode: 'generate',
                                             costDetails: toCostDetails(finalUsage),
                                             size: size ?? undefined,
@@ -843,8 +805,7 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename,
-                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                                filename: image.filename
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'minio',
@@ -853,8 +814,6 @@ export async function POST(request: NextRequest) {
                                             background,
                                             moderation,
                                             prompt,
-                                            revisedPrompt:
-                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                             mode: 'generate',
                                             costDetails: toCostDetails(finalUsage),
                                             size: size ?? undefined,
@@ -1039,7 +998,6 @@ export async function POST(request: NextRequest) {
                                 b64_json?: string;
                                 path?: string;
                                 output_format: string;
-                                revised_prompt?: string;
                             }> = [];
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
@@ -1094,7 +1052,6 @@ export async function POST(request: NextRequest) {
 
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
-                                    const revisedPrompt = getStreamEventRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
@@ -1115,7 +1072,6 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         output_format: fileExtension,
                                         ...(shouldInlineImageData && b64Json ? { b64_json: b64Json } : {}),
-                                        ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}),
                                         ...(savedPath ? { path: savedPath } : {})
                                     };
                                     completedImages.push(imageData);
@@ -1126,8 +1082,7 @@ export async function POST(request: NextRequest) {
                                         filename,
                                         b64_json: shouldInlineImageData ? b64Json : undefined,
                                         path: savedPath,
-                                        output_format: fileExtension,
-                                        revised_prompt: revisedPrompt
+                                        output_format: fileExtension
                                     };
                                     if (!safeEnqueueData(completedEvent)) {
                                         break;
@@ -1180,7 +1135,6 @@ export async function POST(request: NextRequest) {
                             const doneEvent: StreamingEvent = {
                                 type: 'done',
                                 images: completedImages,
-                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                 usage: finalUsage
                             };
                             if (completedImages.length > 0) {
@@ -1189,8 +1143,7 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename,
-                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                                filename: image.filename
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'fs',
@@ -1199,8 +1152,6 @@ export async function POST(request: NextRequest) {
                                             background: 'auto',
                                             moderation: 'auto',
                                             prompt,
-                                            revisedPrompt:
-                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                             mode: 'edit',
                                             costDetails: toCostDetails(finalUsage),
                                             size: size && size !== 'auto' ? size : undefined,
@@ -1219,8 +1170,7 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename,
-                                                ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                                                filename: image.filename
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'minio',
@@ -1229,8 +1179,6 @@ export async function POST(request: NextRequest) {
                                             background: 'auto',
                                             moderation: 'auto',
                                             prompt,
-                                            revisedPrompt:
-                                                completedImages.find((image) => image.revised_prompt)?.revised_prompt,
                                             mode: 'edit',
                                             costDetails: toCostDetails(finalUsage),
                                             size: size && size !== 'auto' ? size : undefined,
@@ -1319,18 +1267,15 @@ export async function POST(request: NextRequest) {
                 } else {
                 }
 
-                const revisedPrompt = getRevisedPrompt(imageData);
                 const imageResult: {
                     filename: string;
                     b64_json: string;
                     path?: string;
                     output_format: string;
-                    revised_prompt?: string;
                 } = {
                     filename: filename,
                     b64_json: imageData.b64_json,
-                    output_format: fileExtension,
-                    ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {})
+                    output_format: fileExtension
                 };
 
                 if (effectiveStorageMode === 'fs') {
@@ -1344,13 +1289,11 @@ export async function POST(request: NextRequest) {
         console.log(`All images processed. Mode: ${effectiveStorageMode}`);
 
         if (effectiveStorageMode === 'fs') {
-            const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
             await persistFsHistoryMetadata(
                 {
                     timestamp: requestTimestamp,
                     images: savedImagesData.map((image) => ({
-                        filename: image.filename,
-                        ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                        filename: image.filename
                     })),
                     status: 'completed',
                     storageModeUsed: 'fs',
@@ -1359,7 +1302,6 @@ export async function POST(request: NextRequest) {
                     background: historyBackground,
                     moderation: historyModeration,
                     prompt,
-                    ...(revisedPrompt ? { revisedPrompt } : {}),
                     mode,
                     costDetails: toCostDetails(result.usage),
                     size: historySize,
@@ -1374,13 +1316,11 @@ export async function POST(request: NextRequest) {
                 image2UserId
             );
         } else if (effectiveStorageMode === 'minio') {
-            const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
             await persistMinioHistoryMetadata(
                 {
                     timestamp: requestTimestamp,
                     images: savedImagesData.map((image) => ({
-                        filename: image.filename,
-                        ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
+                        filename: image.filename
                     })),
                     status: 'completed',
                     storageModeUsed: 'minio',
@@ -1389,7 +1329,6 @@ export async function POST(request: NextRequest) {
                     background: historyBackground,
                     moderation: historyModeration,
                     prompt,
-                    ...(revisedPrompt ? { revisedPrompt } : {}),
                     mode,
                     costDetails: toCostDetails(result.usage),
                     size: historySize,
@@ -1407,7 +1346,6 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({
             images: savedImagesData,
-            revised_prompt: savedImagesData.find((image) => image.revised_prompt)?.revised_prompt,
             usage: result.usage
         });
     } catch (error: unknown) {

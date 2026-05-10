@@ -11,7 +11,6 @@ import * as React from 'react';
 type ImageInfo = {
     path: string;
     filename: string;
-    revisedPrompt?: string;
 };
 
 type ImageOutputProps = {
@@ -55,20 +54,9 @@ export function ImageOutput({
 }: ImageOutputProps) {
     const { t } = useI18n();
     const [previewImage, setPreviewImage] = React.useState<PreviewImage | null>(null);
-    const [promptView, setPromptView] = React.useState<'original' | 'revised'>('original');
     const elapsedLabel = t('output.elapsed', { time: formatElapsedTime(elapsedSeconds) });
     const selectedImage = typeof viewMode === 'number' && imageBatch ? imageBatch[viewMode] : null;
-    const originalPrompt = promptText?.trim();
-    const revisedPrompt = selectedImage?.revisedPrompt?.trim();
-    const activePromptKind =
-        promptView === 'revised' && revisedPrompt ? 'revised' : originalPrompt ? 'original' : 'revised';
-    const activePrompt = activePromptKind === 'revised' ? revisedPrompt || '' : originalPrompt || '';
-    const activePromptTitle =
-        activePromptKind === 'revised' ? t('output.revisedPromptTitle') : t('output.originalPromptTitle');
-
-    React.useEffect(() => {
-        setPromptView('original');
-    }, [selectedImage?.filename, promptText]);
+    const activePrompt = promptText?.trim();
 
     const handleSendClick = () => {
         // Send to edit only works when a single image is selected
@@ -292,33 +280,7 @@ export function ImageOutput({
             {selectedImage && activePrompt && (
                 <div className='max-h-20 w-full shrink-0 overflow-y-auto border border-slate-200 bg-white p-3 text-[12px] text-slate-600 dark:border-white/10 dark:bg-white/[0.035] dark:text-white/70'>
                     <div className='mb-1 flex items-center justify-between gap-2'>
-                        <p className='font-medium text-slate-800 dark:text-white/85'>{activePromptTitle}</p>
-                        {originalPrompt && revisedPrompt && (
-                            <div className='flex rounded border border-white/10 p-0.5'>
-                                <button
-                                    type='button'
-                                    onClick={() => setPromptView('original')}
-                                    className={cn(
-                                        'rounded px-1.5 py-0.5 text-[11px]',
-                                        promptView === 'original'
-                                            ? 'bg-white/15 text-white'
-                                            : 'text-white/45 hover:text-white/75'
-                                    )}>
-                                    {t('output.originalPromptTitle')}
-                                </button>
-                                <button
-                                    type='button'
-                                    onClick={() => setPromptView('revised')}
-                                    className={cn(
-                                        'rounded px-1.5 py-0.5 text-[11px]',
-                                        promptView === 'revised'
-                                            ? 'bg-white/15 text-white'
-                                            : 'text-white/45 hover:text-white/75'
-                                    )}>
-                                    {t('output.revisedPromptTitle')}
-                                </button>
-                            </div>
-                        )}
+                        <p className='font-medium text-slate-800 dark:text-white/85'>{t('common.prompt')}</p>
                     </div>
                     <p className='whitespace-pre-wrap'>{activePrompt}</p>
                 </div>

@@ -29,7 +29,6 @@ type ImageHistoryItem = {
     mode: 'generate';
     costDetails: null;
     output_format: 'png' | 'jpeg' | 'webp';
-    revisedPrompt?: string;
     size?: string;
     output_compression?: number;
     streaming?: boolean;
@@ -83,6 +82,39 @@ function getOutputFormat(filename: string): 'png' | 'jpeg' | 'webp' {
     return 'png';
 }
 
+function normalizeHistoryItem(value: unknown, timestamp: number): ImageHistoryItem | null {
+    if (!value || typeof value !== 'object') return null;
+
+    const source = value as Partial<ImageHistoryItem>;
+    if (source.timestamp !== timestamp || !Array.isArray(source.images) || source.status !== 'completed') {
+        return null;
+    }
+
+    return {
+        timestamp: source.timestamp,
+        images: source.images
+            .map((image) => ({ filename: image.filename }))
+            .filter((image) => typeof image.filename === 'string' && image.filename),
+        status: 'completed',
+        storageModeUsed: source.storageModeUsed === 'minio' ? 'minio' : 'fs',
+        durationMs: typeof source.durationMs === 'number' ? source.durationMs : 0,
+        quality: 'auto',
+        background: 'auto',
+        moderation: 'auto',
+        prompt: typeof source.prompt === 'string' ? source.prompt : '',
+        mode: 'generate',
+        costDetails: null,
+        output_format: source.output_format || getOutputFormat(source.images[0]?.filename || ''),
+        size: source.size,
+        output_compression: source.output_compression,
+        streaming: source.streaming,
+        partialImages: source.partialImages,
+        sourceImageCount: source.sourceImageCount,
+        hasMask: source.hasMask,
+        model: source.model
+    };
+}
+
 async function loadFsHistory(request: NextRequest, image2UserId?: number): Promise<ImageHistoryItem[]> {
     const since = getSinceTimestamp(request);
     const sortOrder = getSortOrder(request);
@@ -101,8 +133,8 @@ async function loadFsHistory(request: NextRequest, image2UserId?: number): Promi
             if (since !== null && timestamp < since) continue;
             try {
                 const raw = await fs.readFile(`${metadataDir}/${entry.name}`, 'utf8');
-                const parsed = JSON.parse(raw) as ImageHistoryItem;
-                if (parsed && parsed.timestamp === timestamp && Array.isArray(parsed.images) && parsed.status === 'completed') {
+                const parsed = normalizeHistoryItem(JSON.parse(raw), timestamp);
+                if (parsed) {
                     metadataMap.set(timestamp, parsed);
                 }
             } catch {}
@@ -165,8 +197,8 @@ async function loadMinioHistory(request: NextRequest, image2UserId?: number): Pr
         if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
         if (since !== null && timestamp < since) continue;
         try {
-            const metadata = await readJsonFromMinio<ImageHistoryItem>(name);
-            if (metadata?.timestamp === timestamp) history.push(metadata);
+            const metadata = normalizeHistoryItem(await readJsonFromMinio<unknown>(name), timestamp);
+            if (metadata) history.push(metadata);
         } catch (error) {
             console.warn(`Failed to read MinIO history metadata ${name}:`, error);
         }
