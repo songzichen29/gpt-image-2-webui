@@ -171,6 +171,7 @@ export default function HomePage() {
     const [showApiKey, setShowApiKey] = React.useState(false);
     const [isLoading, setIsLoading] = React.useState(false);
     const isLoadingRef = React.useRef(false);
+    const apiCallInFlightRef = React.useRef(false);
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
@@ -696,11 +697,18 @@ export default function HomePage() {
     ]);
 
     const handleApiCall = async (formData: GenerationFormData | EditingFormData) => {
+        if (apiCallInFlightRef.current) {
+            console.warn('Ignored duplicate /api/images submit while a request is already in progress.');
+            return;
+        }
+
+        apiCallInFlightRef.current = true;
         const startTime = Date.now();
         let durationMs = 0;
         let pendingHistoryEntry: HistoryMetadata | null = null;
 
         setIsLoading(true);
+        isLoadingRef.current = true;
         setActiveRequestStartedAt(startTime);
         setElapsedSeconds(0);
         setError(null);
@@ -714,6 +722,8 @@ export default function HomePage() {
         if (authMode === 'sub2api' && (!isAuthReady || !image2User)) {
             setError(t('page.unauthorized'));
             setIsLoading(false);
+            isLoadingRef.current = false;
+            apiCallInFlightRef.current = false;
             return;
         }
 
@@ -729,6 +739,8 @@ export default function HomePage() {
             setPasswordDialogContext('initial');
             setIsPasswordDialogOpen(true);
             setIsLoading(false);
+            isLoadingRef.current = false;
+            apiCallInFlightRef.current = false;
             return;
         }
         apiFormData.append('mode', mode);
@@ -789,6 +801,8 @@ export default function HomePage() {
             if (!editData.imageFiles || editData.imageFiles.length === 0) {
                 setError(t('page.noImageSelectedForEditing')); // 没有图片就报错并退出
                 setIsLoading(false);
+                isLoadingRef.current = false;
+                apiCallInFlightRef.current = false;
                 return;
             }
             requestModel = editData.model;
@@ -1329,6 +1343,8 @@ export default function HomePage() {
         } finally {
             if (durationMs === 0) durationMs = Date.now() - startTime;
             setIsLoading(false);
+            isLoadingRef.current = false;
+            apiCallInFlightRef.current = false;
             setActiveRequestStartedAt(null);
         }
     };
