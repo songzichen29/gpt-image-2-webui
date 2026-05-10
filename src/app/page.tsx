@@ -25,7 +25,6 @@ import { getPresetDimensions, validateGptImage2Size } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { RotateCcw } from 'lucide-react';
 import { useTheme } from 'next-themes';
-import { useRouter } from 'next/navigation';
 import * as React from 'react';
 
 type HistoryImage = {
@@ -176,7 +175,6 @@ function getClientSessionId(): string {
 }
 
 export default function HomePage() {
-    const router = useRouter();
     const { language, languagePreference, setLanguagePreference, t } = useI18n();
     const { settings, modelOptions, saveSettings } = useAppSettings();
     const { resolvedTheme, setTheme } = useTheme();
@@ -327,6 +325,10 @@ export default function HomePage() {
     const handleThemeToggle = () => {
         setTheme(currentTheme === 'dark' ? 'light' : 'dark');
     };
+
+    const openHistoryPage = React.useCallback(() => {
+        window.location.assign('/history');
+    }, []);
 
     React.useEffect(() => {
         const handlePointerDown = (event: PointerEvent) => {
@@ -1502,7 +1504,7 @@ export default function HomePage() {
                         currentTheme={currentTheme}
                         menuLabel={mode === 'edit' ? t('mode.edit') : t('nav.generate')}
                         onOpenHelp={() => setShowHelpDialog(true)}
-                        onOpenHistory={() => router.push('/history')}
+                        onOpenHistory={openHistoryPage}
                         onOpenSettings={() => setShowPreferences(true)}
                         onToggleTheme={handleThemeToggle}
                     />
@@ -1898,7 +1900,7 @@ export default function HomePage() {
                         currentItem={mode}
                         onEditClick={() => setMode('edit')}
                         onGenerateClick={() => setMode('generate')}
-                        onHistoryClick={() => router.push('/history')}
+                        onHistoryClick={openHistoryPage}
                     />
                 </div>
             </div>

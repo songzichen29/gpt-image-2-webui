@@ -251,9 +251,9 @@ export default function HistoryPage() {
 
     const handleSelectImage = React.useCallback(
         (item: HistoryMetadata, imageIndex = 0) => {
-            router.push(`/history/${item.timestamp}?image=${imageIndex}`);
+            window.location.assign(`/history/${item.timestamp}?image=${imageIndex}`);
         },
-        [router]
+        []
     );
 
     const handleClearHistory = React.useCallback(async () => {

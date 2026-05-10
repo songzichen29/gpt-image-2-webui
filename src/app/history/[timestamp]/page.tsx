@@ -94,8 +94,7 @@ export default function HistoryDetailPage() {
                 if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
                     query.set('passwordHash', clientPasswordHash);
                 }
-                query.set('since', timestamp.toString());
-                query.set('page_size', '1000');
+                query.set('timestamp', timestamp.toString());
 
                 const response = await fetch(`/api/image-history${query.size ? `?${query.toString()}` : ''}`, {
                     cache: 'no-store'
