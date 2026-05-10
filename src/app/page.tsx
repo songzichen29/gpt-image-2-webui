@@ -20,11 +20,11 @@ import { useAppSettings } from '@/lib/app-settings';
 import { calculateApiCost, formatUsdCny, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
 import { db, LEGACY_IMAGE_USER_ID, type ImageRecord } from '@/lib/db';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
+import { buildApiImageUrl } from '@/lib/image-url';
 import { getPresetDimensions, validateGptImage2Size } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { RotateCcw } from 'lucide-react';
 import { useTheme } from 'next-themes';
-import { useRouter } from 'next/navigation';
 import * as React from 'react';
 
 type HistoryImage = {
@@ -87,7 +87,7 @@ console.log(
 type ApiImageResponseItem = {
     filename: string;
     b64_json?: string;
-    output_format: string;
+    output_format?: string;
     path?: string;
 };
 
@@ -176,7 +176,6 @@ function getClientSessionId(): string {
 }
 
 export default function HomePage() {
-    const router = useRouter();
     const { language, languagePreference, setLanguagePreference, t } = useI18n();
     const { settings, modelOptions, saveSettings } = useAppSettings();
     const { resolvedTheme, setTheme } = useTheme();
@@ -328,6 +327,10 @@ export default function HomePage() {
     const handleThemeToggle = () => {
         setTheme(currentTheme === 'dark' ? 'light' : 'dark');
     };
+
+    const openHistoryPage = React.useCallback(() => {
+        window.location.assign('/history');
+    }, []);
 
     React.useEffect(() => {
         const handlePointerDown = (event: PointerEvent) => {
@@ -500,7 +503,12 @@ export default function HomePage() {
 
     const cacheApiImageForDisplay = React.useCallback(async (img: ApiImageResponseItem): Promise<ImageBatchItem | null> => {
         if (img.b64_json) {
-            const actualMimeType = getMimeTypeFromFormat(img.output_format);
+            const fallbackOutputFormat = img.filename.toLowerCase().endsWith('.webp')
+                ? 'webp'
+                : img.filename.toLowerCase().match(/\.jpe?g$/)
+                  ? 'jpeg'
+                  : 'png';
+            const actualMimeType = getMimeTypeFromFormat(img.output_format || fallbackOutputFormat);
             const immediatePath = `data:${actualMimeType};base64,${img.b64_json}`;
 
             try {
@@ -569,7 +577,7 @@ export default function HomePage() {
             item.images.map((image) => ({
                 filename: image.filename,
                 output_format: item.output_format || getOutputFormatFromFilename(image.filename),
-                path: `/api/image/${image.filename}`
+                path: buildApiImageUrl(image.filename, item.timestamp)
             }));
 
         const restoreCompletedEntry = async (item: HistoryMetadata) => {
@@ -1392,7 +1400,7 @@ export default function HomePage() {
             } else if (effectiveStorageModeClient === 'indexeddb') {
                 throw new Error(t('page.imageNotFoundLocal', { filename }));
             } else {
-                const response = await fetch(`/api/image/${filename}`);
+                const response = await fetch(buildApiImageUrl(filename), { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(t('page.fetchImageFailed', { statusText: response.statusText }));
                 }
@@ -1526,7 +1534,7 @@ export default function HomePage() {
                         currentTheme={currentTheme}
                         menuLabel={mode === 'edit' ? t('mode.edit') : t('nav.generate')}
                         onOpenHelp={() => setShowHelpDialog(true)}
-                        onOpenHistory={() => router.push('/history')}
+                        onOpenHistory={openHistoryPage}
                         onOpenSettings={() => setShowPreferences(true)}
                         onToggleTheme={handleThemeToggle}
                     />
@@ -1922,7 +1930,7 @@ export default function HomePage() {
                         currentItem={mode}
                         onEditClick={() => setMode('edit')}
                         onGenerateClick={() => setMode('generate')}
-                        onHistoryClick={() => router.push('/history')}
+                        onHistoryClick={openHistoryPage}
                     />
                 </div>
             </div>

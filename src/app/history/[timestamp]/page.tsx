@@ -10,6 +10,7 @@ import { formatUsdCny, getModelRates, USD_TO_CNY_RATE, type GptImageModel } from
 import { db, LEGACY_IMAGE_USER_ID, type ImageRecord } from '@/lib/db';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
 import { getServerImageExpiryStatus } from '@/lib/image-retention';
+import { buildApiImageUrl } from '@/lib/image-url';
 import { cn } from '@/lib/utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { ArrowLeft, Check, Clock, Copy, Database, Download, FileImage, HardDrive } from 'lucide-react';
@@ -96,8 +97,7 @@ export default function HistoryDetailPage() {
                 if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
                     query.set('passwordHash', clientPasswordHash);
                 }
-                query.set('since', timestamp.toString());
-                query.set('page_size', '1000');
+                query.set('timestamp', timestamp.toString());
 
                 const response = await fetch(`/api/image-history${query.size ? `?${query.toString()}` : ''}`, {
                     cache: 'no-store'
@@ -182,7 +182,7 @@ export default function HistoryDetailPage() {
             }
 
             if (storageMode === 'fs' || storageMode === 'minio') {
-                nextSrcByFilename[imageInfo.filename] = `/api/image/${imageInfo.filename}`;
+                nextSrcByFilename[imageInfo.filename] = buildApiImageUrl(imageInfo.filename, item.timestamp);
             }
         });
 

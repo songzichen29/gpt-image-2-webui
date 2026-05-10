@@ -18,6 +18,7 @@ import {
 import { formatUsdCny, USD_TO_CNY_RATE } from '@/lib/cost-utils';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
 import { getServerImageExpiryStatus } from '@/lib/image-retention';
+import { buildApiImageUrl } from '@/lib/image-url';
 import { cn } from '@/lib/utils';
 import {
     Clock,
@@ -241,7 +242,7 @@ function HistoryPanelImpl({
                                     src:
                                         getImageSrc(imageInfo.filename) ??
                                         (isServerStorage && isImageCacheReady
-                                            ? `/api/image/${imageInfo.filename}`
+                                            ? buildApiImageUrl(imageInfo.filename, item.timestamp)
                                             : undefined)
                                 }));
                             const firstPreview = imagePreviews[0];
@@ -303,6 +304,7 @@ function HistoryPanelImpl({
                                                         fill
                                                         sizes='64px'
                                                         className='h-full w-full object-cover'
+                                                        unoptimized
                                                     />
                                                 ) : (
                                                     <div className='flex h-full w-full items-center justify-center bg-slate-100 text-slate-400 dark:bg-neutral-800 dark:text-neutral-500'>
