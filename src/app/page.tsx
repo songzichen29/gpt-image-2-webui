@@ -198,6 +198,11 @@ export default function HomePage() {
     const [isLoading, setIsLoading] = React.useState(false);
     const isLoadingRef = React.useRef(false);
     const apiCallInFlightRef = React.useRef(false);
+    const activeRequestStartedAtRef = React.useRef<number | null>(null);
+    const activeApiRequestAbortControllerRef = React.useRef<{ timestamp: number; controller: AbortController } | null>(
+        null
+    );
+    const recoveredRequestTimestampsRef = React.useRef<Set<number>>(new Set());
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
@@ -267,6 +272,10 @@ export default function HomePage() {
     React.useEffect(() => {
         isLoadingRef.current = isLoading;
     }, [isLoading]);
+
+    React.useEffect(() => {
+        activeRequestStartedAtRef.current = activeRequestStartedAt;
+    }, [activeRequestStartedAt]);
 
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
@@ -555,32 +564,18 @@ export default function HomePage() {
         return 'png';
     }, []);
 
-    React.useEffect(() => {
-        if (effectiveStorageModeClient === 'indexeddb' || isLoadingRef.current || latestImageBatch) {
-            return;
-        }
-
-        if (authMode === 'sub2api' && !isAuthReady) {
-            return;
-        }
-
-        if (authMode !== 'sub2api' && isPasswordRequiredByBackend && !clientPasswordHash) {
-            return;
-        }
-
-        const latestHistoryEntry = [...history].sort((left, right) => right.timestamp - left.timestamp)[0];
-        if (!latestHistoryEntry) {
-            return;
-        }
-
-        const toApiImages = (item: HistoryMetadata): ApiImageResponseItem[] =>
+    const toApiImages = React.useCallback(
+        (item: HistoryMetadata): ApiImageResponseItem[] =>
             item.images.map((image) => ({
                 filename: image.filename,
                 output_format: item.output_format || getOutputFormatFromFilename(image.filename),
                 path: buildApiImageUrl(image.filename, item.timestamp)
-            }));
+            })),
+        [getOutputFormatFromFilename]
+    );
 
-        const restoreCompletedEntry = async (item: HistoryMetadata) => {
+    const restoreCompletedEntry = React.useCallback(
+        async (item: HistoryMetadata) => {
             const processedImages = (await Promise.all(toApiImages(item).map(cacheApiImageForDisplay))).filter(
                 Boolean
             ) as ImageBatchItem[];
@@ -617,21 +612,43 @@ export default function HomePage() {
                       }
                     : undefined
             });
-        };
+        },
+        [cacheApiImageForDisplay, selectedModel, toApiImages]
+    );
 
-        if (latestHistoryEntry.images.length > 0 && latestHistoryEntry.status !== 'pending') {
-            restoreCompletedEntry(latestHistoryEntry);
+    React.useEffect(() => {
+        if (effectiveStorageModeClient === 'indexeddb') {
+            return;
+        }
+
+        if (authMode === 'sub2api' && !isAuthReady) {
+            return;
+        }
+
+        if (authMode !== 'sub2api' && isPasswordRequiredByBackend && !clientPasswordHash) {
+            return;
+        }
+
+        const latestHistoryEntry = [...history].sort((left, right) => right.timestamp - left.timestamp)[0];
+        if (!latestHistoryEntry) {
             return;
         }
 
         if (latestHistoryEntry.status !== 'pending') {
+            if (isLoadingRef.current || latestImageBatch || latestHistoryEntry.images.length === 0) {
+                return;
+            }
+
+            restoreCompletedEntry(latestHistoryEntry);
             return;
         }
 
         const controller = new AbortController();
         setMode(latestHistoryEntry.mode);
         setIsLoading(true);
+        isLoadingRef.current = true;
         setActiveRequestStartedAt(latestHistoryEntry.timestamp);
+        activeRequestStartedAtRef.current = latestHistoryEntry.timestamp;
         setElapsedSeconds(Math.max(0, Math.floor((Date.now() - latestHistoryEntry.timestamp) / 1000)));
         setLatestBatchPrompt(latestHistoryEntry.prompt);
         setImageOutputView('grid');
@@ -662,8 +679,7 @@ export default function HomePage() {
                 if (authMode !== 'sub2api' && isPasswordRequiredByBackend && clientPasswordHash) {
                     params.set('passwordHash', clientPasswordHash);
                 }
-                params.set('since', latestHistoryEntry.timestamp.toString());
-                params.set('page_size', '1000');
+                params.set('timestamp', latestHistoryEntry.timestamp.toString());
 
                 const response = await fetch(`/api/image-history${params.size ? `?${params.toString()}` : ''}`, {
                     cache: 'no-store',
@@ -702,8 +718,24 @@ export default function HomePage() {
                     prevHistory.map((item) => (item.timestamp === completedEntry.timestamp ? completedEntry : item))
                 );
                 await restoreCompletedEntry(completedEntry);
-                setIsLoading(false);
-                setActiveRequestStartedAt(null);
+
+                recoveredRequestTimestampsRef.current.add(completedEntry.timestamp);
+                const activeAbortController = activeApiRequestAbortControllerRef.current;
+                if (activeAbortController?.timestamp === completedEntry.timestamp) {
+                    activeAbortController.controller.abort();
+                    activeApiRequestAbortControllerRef.current = null;
+                }
+
+                if (
+                    activeRequestStartedAtRef.current === null ||
+                    activeRequestStartedAtRef.current === completedEntry.timestamp
+                ) {
+                    setIsLoading(false);
+                    isLoadingRef.current = false;
+                    apiCallInFlightRef.current = false;
+                    setActiveRequestStartedAt(null);
+                    activeRequestStartedAtRef.current = null;
+                }
             } catch (loadError) {
                 if (loadError instanceof DOMException && loadError.name === 'AbortError') {
                     return;
@@ -724,11 +756,11 @@ export default function HomePage() {
         authMode,
         cacheApiImageForDisplay,
         clientPasswordHash,
-        getOutputFormatFromFilename,
         history,
         isAuthReady,
         isPasswordRequiredByBackend,
         latestImageBatch,
+        restoreCompletedEntry,
         selectedModel,
         setHistory
     ]);
@@ -743,11 +775,14 @@ export default function HomePage() {
         const startTime = Date.now();
         const clientRequestId = createClientTraceId('image-request');
         const clientSessionId = getClientSessionId();
+        const apiRequestAbortController = new AbortController();
         let durationMs = 0;
         let pendingHistoryEntry: HistoryMetadata | null = null;
 
         setIsLoading(true);
         isLoadingRef.current = true;
+        activeRequestStartedAtRef.current = startTime;
+        activeApiRequestAbortControllerRef.current = { timestamp: startTime, controller: apiRequestAbortController };
         setActiveRequestStartedAt(startTime);
         setElapsedSeconds(0);
         setError(null);
@@ -762,6 +797,8 @@ export default function HomePage() {
             setError(t('page.unauthorized'));
             setIsLoading(false);
             isLoadingRef.current = false;
+            activeRequestStartedAtRef.current = null;
+            activeApiRequestAbortControllerRef.current = null;
             apiCallInFlightRef.current = false;
             return;
         }
@@ -779,6 +816,8 @@ export default function HomePage() {
             setIsPasswordDialogOpen(true);
             setIsLoading(false);
             isLoadingRef.current = false;
+            activeRequestStartedAtRef.current = null;
+            activeApiRequestAbortControllerRef.current = null;
             apiCallInFlightRef.current = false;
             return;
         }
@@ -843,6 +882,8 @@ export default function HomePage() {
                 setError(t('page.noImageSelectedForEditing')); // 没有图片就报错并退出
                 setIsLoading(false);
                 isLoadingRef.current = false;
+                activeRequestStartedAtRef.current = null;
+                activeApiRequestAbortControllerRef.current = null;
                 apiCallInFlightRef.current = false;
                 return;
             }
@@ -931,7 +972,8 @@ export default function HomePage() {
         try {
             const response = await fetch('/api/images', {
                 method: 'POST',
-                body: apiFormData
+                body: apiFormData,
+                signal: apiRequestAbortController.signal
             });
 
             // Check if response is SSE (streaming)
@@ -1318,6 +1360,11 @@ export default function HomePage() {
             }
         } catch (err: unknown) {
             durationMs = Date.now() - startTime;
+            const requestWasRecovered = recoveredRequestTimestampsRef.current.has(startTime);
+            if (requestWasRecovered) {
+                return;
+            }
+
             console.error(`API Call Error after ${durationMs}ms:`, err);
 
             const finalizeStreamingRecovery = finalizeStreamingImagesForRecovery as
@@ -1363,10 +1410,16 @@ export default function HomePage() {
             setLatestBatchPrompt('');
         } finally {
             if (durationMs === 0) durationMs = Date.now() - startTime;
-            setIsLoading(false);
-            isLoadingRef.current = false;
-            apiCallInFlightRef.current = false;
-            setActiveRequestStartedAt(null);
+            if (activeApiRequestAbortControllerRef.current?.timestamp === startTime) {
+                activeApiRequestAbortControllerRef.current = null;
+            }
+            if (activeRequestStartedAtRef.current === startTime) {
+                setIsLoading(false);
+                isLoadingRef.current = false;
+                apiCallInFlightRef.current = false;
+                setActiveRequestStartedAt(null);
+                activeRequestStartedAtRef.current = null;
+            }
         }
     };
 
