@@ -899,6 +899,7 @@ export async function POST(request: NextRequest) {
         const openai = new OpenAI({
             apiKey,
             baseURL: baseURL || undefined,
+            maxRetries: 0,
             timeout: imageRequestTimeoutMs,
             defaultHeaders: {
                 'Accept-Language': acceptLanguage
