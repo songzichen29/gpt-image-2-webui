@@ -109,14 +109,12 @@ export function ImagePreviewDialog({
     }, []);
 
     React.useEffect(() => {
-        if (!open) {
-            resetView();
-            touchStartXRef.current = null;
-            touchStartYRef.current = null;
-            swipeHandledRef.current = false;
-            dragStartRef.current = null;
-            hasDraggedRef.current = false;
-        }
+        resetView();
+        touchStartXRef.current = null;
+        touchStartYRef.current = null;
+        swipeHandledRef.current = false;
+        dragStartRef.current = null;
+        hasDraggedRef.current = false;
     }, [image?.src, open, resetView]);
 
     React.useEffect(() => {
