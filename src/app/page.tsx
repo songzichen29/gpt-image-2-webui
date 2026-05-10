@@ -1162,8 +1162,11 @@ export default function HomePage() {
                                         updateStreamingStats();
                                         await displayStreamingImages();
 
-                                        if (requestImageCount === 1) {
-                                            continue;
+                                        if (getOrderedStreamedImages().length >= requestImageCount) {
+                                            streamingDoneReceived = true;
+                                            await finalizeStreamingImages(getOrderedStreamedImages(), event.usage);
+                                            shouldStopReading = true;
+                                            break;
                                         }
                                     }
                                 } else if (event.type === 'done') {
@@ -1189,11 +1192,6 @@ export default function HomePage() {
                     }
 
                     if (shouldStopReading) {
-                        try {
-                            await reader.cancel();
-                        } catch (cancelError) {
-                            console.warn('Failed to cancel SSE reader after streaming completion:', cancelError);
-                        }
                         break;
                     }
                 }
