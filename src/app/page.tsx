@@ -112,6 +112,8 @@ type ImageApiResult = {
 
 type ApiResponseInfo = {
     status: 'loading' | 'success' | 'error';
+    requestId?: string;
+    clientSessionId?: string;
     endpoint: string;
     method: string;
     startedAt: number;
@@ -146,6 +148,35 @@ function formatApiDuration(durationMs?: number): string {
 
 function formatContentType(contentType?: string | null): string {
     return contentType?.split(';')[0] || '-';
+}
+
+const CLIENT_SESSION_ID_STORAGE_KEY = 'gpt-image-2-webui-client-session-id';
+
+function createClientTraceId(prefix: string): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return `${prefix}-${crypto.randomUUID()}`;
+    }
+
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getClientSessionId(): string {
+    if (typeof window === 'undefined') {
+        return createClientTraceId('ssr-session');
+    }
+
+    try {
+        const existingSessionId = window.localStorage.getItem(CLIENT_SESSION_ID_STORAGE_KEY);
+        if (existingSessionId) {
+            return existingSessionId;
+        }
+
+        const newSessionId = createClientTraceId('browser-session');
+        window.localStorage.setItem(CLIENT_SESSION_ID_STORAGE_KEY, newSessionId);
+        return newSessionId;
+    } catch {
+        return createClientTraceId('volatile-session');
+    }
 }
 
 export default function HomePage() {
@@ -696,6 +727,8 @@ export default function HomePage() {
 
         apiCallInFlightRef.current = true;
         const startTime = Date.now();
+        const clientRequestId = createClientTraceId('image-request');
+        const clientSessionId = getClientSessionId();
         let durationMs = 0;
         let pendingHistoryEntry: HistoryMetadata | null = null;
 
@@ -736,6 +769,8 @@ export default function HomePage() {
             return;
         }
         apiFormData.append('mode', mode);
+        apiFormData.append('client_request_id', clientRequestId);
+        apiFormData.append('client_session_id', clientSessionId);
 
         let requestSize = '';
         let requestOutputCompression: number | undefined;
@@ -827,6 +862,8 @@ export default function HomePage() {
 
         setApiResponseInfo({
             status: 'loading',
+            requestId: clientRequestId,
+            clientSessionId,
             endpoint: '/api/images',
             method: 'POST',
             startedAt: startTime,
@@ -1423,6 +1460,11 @@ export default function HomePage() {
               [
                   t('apiInfo.httpStatus'),
                   apiResponseInfo.httpStatus ? `${apiResponseInfo.httpStatus}` : '-'
+              ],
+              [t('apiInfo.requestId'), apiResponseInfo.requestId || '-'],
+              [
+                  t('apiInfo.clientSession'),
+                  apiResponseInfo.clientSessionId ? apiResponseInfo.clientSessionId.slice(-12) : '-'
               ],
               [t('apiInfo.duration'), apiInfoDuration],
               [t('apiInfo.responseType'), apiResponseInfo.responseKind || formatContentType(apiResponseInfo.contentType)],

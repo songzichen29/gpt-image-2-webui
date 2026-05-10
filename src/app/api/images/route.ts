@@ -73,6 +73,25 @@ type PersistedHistoryMetadata = {
 
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
+const IN_FLIGHT_IMAGE_REQUEST_TTL_MS = 30 * 60 * 1000;
+
+type ImageRequestLockMetadata = {
+    serverRequestId: string;
+    clientRequestId?: string;
+    scope: string;
+    mode: 'generate' | 'edit';
+    promptHash: string;
+    promptPreview: string;
+    startedAt: number;
+    userAgentHash: string;
+};
+
+const globalForImageRequestLocks = globalThis as typeof globalThis & {
+    __gptImage2WebuiInFlightImageRequests?: Map<string, ImageRequestLockMetadata>;
+};
+const inFlightImageRequests =
+    globalForImageRequestLocks.__gptImage2WebuiInFlightImageRequests ?? new Map<string, ImageRequestLockMetadata>();
+globalForImageRequestLocks.__gptImage2WebuiInFlightImageRequests = inFlightImageRequests;
 
 function getImageRequestTimeoutMs() {
     const configuredTimeout = Number.parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS || '', 10);
@@ -82,6 +101,137 @@ function getImageRequestTimeoutMs() {
     }
 
     return DEFAULT_IMAGE_REQUEST_TIMEOUT_MS;
+}
+
+function getStringFormValue(value: FormDataEntryValue | null): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function getClientAddress(request: NextRequest): string {
+    return (
+        request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+        request.headers.get('x-real-ip')?.trim() ||
+        'unknown'
+    );
+}
+
+function getRequestScope(request: NextRequest, userId: number | undefined, clientSessionId?: string): string {
+    if (userId !== undefined) {
+        return `user:${userId}`;
+    }
+
+    if (clientSessionId) {
+        return `session:${sha256(clientSessionId).slice(0, 16)}`;
+    }
+
+    const userAgent = request.headers.get('user-agent') || 'unknown';
+    return `network:${sha256(`${getClientAddress(request)}|${userAgent}`).slice(0, 16)}`;
+}
+
+function pruneStaleImageRequestLocks(now = Date.now()) {
+    for (const [key, metadata] of inFlightImageRequests.entries()) {
+        if (now - metadata.startedAt > IN_FLIGHT_IMAGE_REQUEST_TTL_MS) {
+            inFlightImageRequests.delete(key);
+            console.warn('Pruned stale /api/images in-flight request lock:', {
+                serverRequestId: metadata.serverRequestId,
+                clientRequestId: metadata.clientRequestId || 'missing',
+                mode: metadata.mode,
+                promptHash: metadata.promptHash,
+                ageMs: now - metadata.startedAt
+            });
+        }
+    }
+}
+
+function acquireImageRequestLock(
+    fingerprint: string,
+    metadata: ImageRequestLockMetadata
+):
+    | { acquired: true; release: () => void }
+    | { acquired: false; active: ImageRequestLockMetadata } {
+    pruneStaleImageRequestLocks(metadata.startedAt);
+
+    const active = inFlightImageRequests.get(fingerprint);
+    if (active) {
+        return { acquired: false, active };
+    }
+
+    inFlightImageRequests.set(fingerprint, metadata);
+    console.log('Acquired /api/images in-flight request lock:', {
+        serverRequestId: metadata.serverRequestId,
+        clientRequestId: metadata.clientRequestId || 'missing',
+        scope: metadata.scope,
+        mode: metadata.mode,
+        promptHash: metadata.promptHash,
+        promptPreview: metadata.promptPreview
+    });
+
+    let released = false;
+    return {
+        acquired: true,
+        release: () => {
+            if (released) return;
+            released = true;
+
+            const activeLock = inFlightImageRequests.get(fingerprint);
+            if (activeLock?.serverRequestId === metadata.serverRequestId) {
+                inFlightImageRequests.delete(fingerprint);
+                console.log('Released /api/images in-flight request lock:', {
+                    serverRequestId: metadata.serverRequestId,
+                    clientRequestId: metadata.clientRequestId || 'missing',
+                    mode: metadata.mode,
+                    promptHash: metadata.promptHash,
+                    durationMs: Math.max(0, Date.now() - metadata.startedAt)
+                });
+            }
+        }
+    };
+}
+
+function buildImageRequestFingerprint(payload: Record<string, unknown>): string {
+    return sha256(JSON.stringify(payload));
+}
+
+function getFileFingerprint(file: File) {
+    return {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified
+    };
+}
+
+function duplicateImageRequestResponse(
+    active: ImageRequestLockMetadata,
+    serverRequestId: string,
+    clientRequestId?: string
+) {
+    const ageMs = Math.max(0, Date.now() - active.startedAt);
+
+    console.warn('Rejected duplicate /api/images request while matching request is still running:', {
+        serverRequestId,
+        clientRequestId: clientRequestId || 'missing',
+        activeServerRequestId: active.serverRequestId,
+        activeClientRequestId: active.clientRequestId || 'missing',
+        mode: active.mode,
+        promptHash: active.promptHash,
+        activeAgeMs: ageMs
+    });
+
+    return NextResponse.json(
+        {
+            error: '相同参数的图片请求正在生成中，请等待当前任务完成。',
+            duplicate: true,
+            active_request_id: active.clientRequestId || active.serverRequestId,
+            active_age_ms: ageMs
+        },
+        {
+            status: 409,
+            headers: {
+                'Retry-After': '15'
+            }
+        }
+    );
 }
 
 function getPreferredAcceptLanguage(responseLanguage: FormDataEntryValue | null, request: NextRequest): string {
@@ -447,11 +597,13 @@ async function persistMinioHistoryMetadata(metadata: PersistedHistoryMetadata, u
 }
 
 export async function POST(request: NextRequest) {
-    console.log('Received POST request to /api/images');
+    const serverRequestId = crypto.randomUUID();
+    let releaseInFlightImageRequest: (() => void) | null = null;
+    console.log('Received POST request to /api/images:', { serverRequestId });
 
     try {
         const effectiveStorageMode = getImageStorageMode();
-        console.log(`Effective Image Storage Mode: ${effectiveStorageMode}`);
+        console.log('Effective Image Storage Mode:', { serverRequestId, effectiveStorageMode });
 
         const image2Session = getImage2Session(request);
         const image2UserId = image2Session?.user.id;
@@ -481,6 +633,8 @@ export async function POST(request: NextRequest) {
 
         const localApiKey = (formData.get('apiKey') as string | null)?.trim();
         const responseLanguage = formData.get('responseLanguage');
+        const clientRequestId = getStringFormValue(formData.get('client_request_id'));
+        const clientSessionId = getStringFormValue(formData.get('client_session_id'));
         const acceptLanguage = getPreferredAcceptLanguage(responseLanguage, request);
         const apiKey = localApiKey || process.env.OPENAI_API_KEY;
         const baseURL = process.env.OPENAI_API_BASE_URL?.trim();
@@ -502,8 +656,8 @@ export async function POST(request: NextRequest) {
                 'Accept-Language': acceptLanguage
             }
         });
-        console.log(`OpenAI image request timeout: ${imageRequestTimeoutMs}ms`);
-        console.log(`OpenAI image request language: ${acceptLanguage}`);
+        console.log('OpenAI image request timeout:', { serverRequestId, timeoutMs: imageRequestTimeoutMs });
+        console.log('OpenAI image request language:', { serverRequestId, acceptLanguage });
 
         const mode = formData.get('mode') as 'generate' | 'edit' | null;
         const prompt = formData.get('prompt') as string | null;
@@ -517,11 +671,26 @@ export async function POST(request: NextRequest) {
             | OpenAI.Images.ImageGenerateParams['model']
             | OpenAI.Images.ImageEditParams['model'];
 
-        console.log(`Mode: ${mode}, Model: ${model}, Prompt: ${prompt ? prompt.substring(0, 50) + '...' : 'N/A'}`);
+        console.log('Image request parsed:', {
+            serverRequestId,
+            clientRequestId: clientRequestId || 'missing',
+            clientSessionHash: clientSessionId ? sha256(clientSessionId).slice(0, 16) : 'missing',
+            clientAddress: getClientAddress(request),
+            userAgentHash: sha256(request.headers.get('user-agent') || 'unknown').slice(0, 16),
+            mode,
+            model,
+            promptHash: prompt ? sha256(prompt).slice(0, 16) : 'missing',
+            promptPreview: prompt ? `${prompt.substring(0, 50)}...` : 'N/A'
+        });
 
         if (!mode || !prompt) {
             return NextResponse.json({ error: 'Missing required parameters: mode and prompt' }, { status: 400 });
         }
+
+        const requestScope = getRequestScope(request, image2UserId, clientSessionId);
+        const promptHash = sha256(prompt).slice(0, 16);
+        const promptPreview = `${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`;
+        const userAgentHash = sha256(request.headers.get('user-agent') || 'unknown').slice(0, 16);
 
         // Check for streaming mode
         const streamRequested = formData.get('stream') === 'true';
@@ -588,6 +757,39 @@ export async function POST(request: NextRequest) {
                     | 1
                     | 2
                     | 3;
+                const requestFingerprint = buildImageRequestFingerprint({
+                    scope: requestScope,
+                    mode: 'generate',
+                    model: String(model),
+                    prompt: promptWithAspectInstruction,
+                    n: requestedImageCount,
+                    size: String(size),
+                    quality: String(quality),
+                    output_format: String(output_format),
+                    output_compression:
+                        'output_compression' in baseParams && typeof baseParams.output_compression === 'number'
+                            ? baseParams.output_compression
+                            : null,
+                    background: String(background),
+                    moderation: String(moderation),
+                    stream: true,
+                    partial_images: actualPartialImages
+                });
+                const requestLock = acquireImageRequestLock(requestFingerprint, {
+                    serverRequestId,
+                    clientRequestId,
+                    scope: requestScope,
+                    mode: 'generate',
+                    promptHash,
+                    promptPreview,
+                    startedAt: Date.now(),
+                    userAgentHash
+                });
+
+                if (!requestLock.acquired) {
+                    return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
+                }
+                const releaseStreamingImageRequestLock = requestLock.release;
 
                 const streamParams = {
                     ...baseParams,
@@ -886,6 +1088,8 @@ export async function POST(request: NextRequest) {
                             clearInterval(heartbeat);
                             safeEnqueueData(errorEvent);
                             safeClose();
+                        } finally {
+                            releaseStreamingImageRequestLock();
                         }
                     }
                 });
@@ -902,6 +1106,38 @@ export async function POST(request: NextRequest) {
 
             const params: OpenAI.Images.ImageGenerateParams = baseParams;
             requestSingleImage = () => openai.images.generate({ ...params, n: 1 });
+            const requestFingerprint = buildImageRequestFingerprint({
+                scope: requestScope,
+                mode: 'generate',
+                model: String(model),
+                prompt: promptWithAspectInstruction,
+                n: requestedImageCount,
+                size: String(size),
+                quality: String(quality),
+                output_format: String(output_format),
+                output_compression:
+                    'output_compression' in baseParams && typeof baseParams.output_compression === 'number'
+                        ? baseParams.output_compression
+                        : null,
+                background: String(background),
+                moderation: String(moderation),
+                stream: false
+            });
+            const requestLock = acquireImageRequestLock(requestFingerprint, {
+                serverRequestId,
+                clientRequestId,
+                scope: requestScope,
+                mode: 'generate',
+                promptHash,
+                promptPreview,
+                startedAt: Date.now(),
+                userAgentHash
+            });
+
+            if (!requestLock.acquired) {
+                return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
+            }
+            releaseInFlightImageRequest = requestLock.release;
             console.log('Calling OpenAI generate with params:', params);
             result = await openai.images.generate(params);
         } else if (mode === 'edit') {
@@ -929,7 +1165,22 @@ export async function POST(request: NextRequest) {
             const maskFile = formData.get('mask') as File | null;
             historyHasMask = Boolean(maskFile);
 
-            if (effectiveStorageMode === 'minio') {
+            const baseEditParams = {
+                model,
+                prompt: withAspectInstruction(prompt, size === 'auto' ? undefined : size, responseLanguage),
+                image: imageFiles,
+                n: requestedImageCount,
+                size: size === 'auto' ? undefined : size,
+                quality: quality === 'auto' ? undefined : quality
+            };
+            const editPromptWithAspectInstruction = baseEditParams.prompt;
+            const imageFileFingerprints = imageFiles.map(getFileFingerprint);
+            const maskFileFingerprint = maskFile ? getFileFingerprint(maskFile) : null;
+            const persistEditSourceFilesToMinio = async () => {
+                if (effectiveStorageMode !== 'minio') {
+                    return;
+                }
+
                 await Promise.all(
                     imageFiles.map(async (file) => {
                         const buffer = Buffer.from(await file.arrayBuffer());
@@ -949,33 +1200,58 @@ export async function POST(request: NextRequest) {
                         maskFile.type || 'image/png'
                     );
                 }
-            }
-
-            const baseEditParams = {
-                model,
-                prompt: withAspectInstruction(prompt, size === 'auto' ? undefined : size, responseLanguage),
-                image: imageFiles,
-                n: requestedImageCount,
-                size: size === 'auto' ? undefined : size,
-                quality: quality === 'auto' ? undefined : quality
             };
 
             // Handle streaming mode for editing
             if (streamRequested) {
-                console.log('Calling OpenAI edit with streaming, params:', {
-                    ...baseEditParams,
-                    stream: true,
-                    partial_images: partialImagesCount,
-                    image: `[${imageFiles.map((f) => f.name).join(', ')}]`,
-                    mask: maskFile ? maskFile.name : 'N/A'
-                });
-
                 const streamEditParams = {
                     ...baseEditParams,
                     stream: true as const,
                     partial_images: Math.max(1, Math.min(partialImagesCount, 3)) as 1 | 2 | 3,
                     ...(maskFile ? { mask: maskFile } : {})
                 };
+                const requestFingerprint = buildImageRequestFingerprint({
+                    scope: requestScope,
+                    mode: 'edit',
+                    model: String(model),
+                    prompt: editPromptWithAspectInstruction,
+                    n: requestedImageCount,
+                    size: size === 'auto' ? null : String(size),
+                    quality: quality === 'auto' ? null : String(quality),
+                    imageFiles: imageFileFingerprints,
+                    maskFile: maskFileFingerprint,
+                    stream: true,
+                    partial_images: streamEditParams.partial_images
+                });
+                const requestLock = acquireImageRequestLock(requestFingerprint, {
+                    serverRequestId,
+                    clientRequestId,
+                    scope: requestScope,
+                    mode: 'edit',
+                    promptHash,
+                    promptPreview,
+                    startedAt: Date.now(),
+                    userAgentHash
+                });
+
+                if (!requestLock.acquired) {
+                    return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
+                }
+                const releaseStreamingImageRequestLock = requestLock.release;
+                try {
+                    await persistEditSourceFilesToMinio();
+                } catch (error) {
+                    releaseStreamingImageRequestLock();
+                    throw error;
+                }
+
+                console.log('Calling OpenAI edit with streaming, params:', {
+                    ...baseEditParams,
+                    stream: true,
+                    partial_images: streamEditParams.partial_images,
+                    image: `[${imageFiles.map((f) => f.name).join(', ')}]`,
+                    mask: maskFile ? maskFile.name : 'N/A'
+                });
 
                 // Create SSE response for edit immediately so the client receives
                 // headers/heartbeats while waiting for the upstream stream.
@@ -1258,6 +1534,8 @@ export async function POST(request: NextRequest) {
                             clearInterval(heartbeat);
                             safeEnqueueData(errorEvent);
                             safeClose();
+                        } finally {
+                            releaseStreamingImageRequestLock();
                         }
                     }
                 });
@@ -1277,6 +1555,34 @@ export async function POST(request: NextRequest) {
                 ...(maskFile ? { mask: maskFile } : {})
             };
             requestSingleImage = () => openai.images.edit({ ...params, n: 1 });
+            const requestFingerprint = buildImageRequestFingerprint({
+                scope: requestScope,
+                mode: 'edit',
+                model: String(model),
+                prompt: editPromptWithAspectInstruction,
+                n: requestedImageCount,
+                size: size === 'auto' ? null : String(size),
+                quality: quality === 'auto' ? null : String(quality),
+                imageFiles: imageFileFingerprints,
+                maskFile: maskFileFingerprint,
+                stream: false
+            });
+            const requestLock = acquireImageRequestLock(requestFingerprint, {
+                serverRequestId,
+                clientRequestId,
+                scope: requestScope,
+                mode: 'edit',
+                promptHash,
+                promptPreview,
+                startedAt: Date.now(),
+                userAgentHash
+            });
+
+            if (!requestLock.acquired) {
+                return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
+            }
+            releaseInFlightImageRequest = requestLock.release;
+            await persistEditSourceFilesToMinio();
 
             console.log('Calling OpenAI edit with params:', {
                 ...params,
@@ -1431,5 +1737,7 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({ error: errorMessage }, { status });
+    } finally {
+        releaseInFlightImageRequest?.();
     }
 }

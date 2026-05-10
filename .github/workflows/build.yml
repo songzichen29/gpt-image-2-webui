@@ -90,3 +90,31 @@ jobs:
             NEXT_PUBLIC_IMAGE_STORAGE_MODE=minio
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Trigger Watchtower deploy
+        if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY" ]; then
+            echo "Skipping deploy: DEPLOY_HOST, DEPLOY_USER, and DEPLOY_SSH_KEY secrets are required."
+            exit 0
+          fi
+
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -p "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'set -eu; cd /data/sub2api-deploy; WATCHTOWER_HTTP_API_PORT="$(grep -m1 "^WATCHTOWER_HTTP_API_PORT=" .env | cut -d= -f2-)"; WATCHTOWER_HTTP_API_TOKEN="$(grep -m1 "^WATCHTOWER_HTTP_API_TOKEN=" .env | cut -d= -f2-)"; curl -fsS -X POST -H "Authorization: Bearer ${WATCHTOWER_HTTP_API_TOKEN}" "http://127.0.0.1:${WATCHTOWER_HTTP_API_PORT:-18080}/v1/update"'
