@@ -1,6 +1,7 @@
 'use client';
 
 import type { HistoryMetadata } from '@/app/page';
+import { ImagePreviewDialog, type PreviewImage } from '@/components/image-preview-dialog';
 import { SiteValueComparison } from '@/components/site-value-comparison';
 import { Button } from '@/components/ui/button';
 import { useHomeAuth } from '@/hooks/use-home-auth';
@@ -36,6 +37,8 @@ export default function HistoryDetailPage() {
     const [item, setItem] = React.useState<HistoryMetadata | null | undefined>(undefined);
     const [selectedImageIndex, setSelectedImageIndex] = React.useState(0);
     const [copiedPrompt, setCopiedPrompt] = React.useState(false);
+    const [previewImage, setPreviewImage] = React.useState<PreviewImage | null>(null);
+    const [previewImageIndex, setPreviewImageIndex] = React.useState<number | null>(null);
     const [imageSrcByFilename, setImageSrcByFilename] = React.useState<Record<string, string>>({});
     const [now, setNow] = React.useState(() => Date.now());
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
@@ -202,6 +205,45 @@ export default function HistoryDetailPage() {
         }
     };
 
+    const openPreview = React.useCallback(
+        (src: string, filename: string, index: number) => {
+            setPreviewImageIndex(index);
+            setPreviewImage({
+                src,
+                filename,
+                alt: t('output.generatedGridAlt', { index: index + 1 })
+            });
+        },
+        [t]
+    );
+
+    const images = React.useMemo(
+        () =>
+            item?.images.map((imageInfo, index) => ({
+                ...imageInfo,
+                index,
+                src: imageSrcByFilename[imageInfo.filename]
+            })) ?? [],
+        [imageSrcByFilename, item]
+    );
+
+    const syncPreviewImage = React.useCallback(
+        (index: number) => {
+            if (!images.length) return;
+            const normalizedIndex = (index + images.length) % images.length;
+            const nextImage = images[normalizedIndex];
+            if (!nextImage?.src) return;
+
+            setPreviewImageIndex(normalizedIndex);
+            setPreviewImage({
+                src: nextImage.src,
+                filename: nextImage.filename,
+                alt: t('output.generatedGridAlt', { index: normalizedIndex + 1 })
+            });
+        },
+        [images, t]
+    );
+
     if (authMode === 'sub2api' && !isAuthReady) {
         return (
             <main className='flex h-screen items-center justify-center overflow-hidden bg-black p-4 text-white'>
@@ -246,11 +288,6 @@ export default function HistoryDetailPage() {
     const generatedAt = new Date(item.timestamp).toLocaleString();
     const expiryStatus = getServerImageExpiryStatus(item.timestamp, now, language);
     const expiresAtText = expiryStatus.expiresAt.toLocaleString();
-    const images = item.images.map((imageInfo, index) => ({
-        ...imageInfo,
-        index,
-        src: imageSrcByFilename[imageInfo.filename]
-    }));
     const selectedImage = images[selectedImageIndex] ?? images[0];
 
     const detailRows: Array<[string, React.ReactNode]> = [
@@ -271,6 +308,28 @@ export default function HistoryDetailPage() {
 
     return (
         <main className='h-screen overflow-hidden bg-black p-3 text-white md:p-4'>
+            <ImagePreviewDialog
+                image={previewImage}
+                open={!!previewImage}
+                currentIndex={previewImageIndex ?? undefined}
+                totalCount={images.length}
+                onPrevious={
+                    images.length > 1 && previewImageIndex !== null
+                        ? () => syncPreviewImage(previewImageIndex - 1)
+                        : undefined
+                }
+                onNext={
+                    images.length > 1 && previewImageIndex !== null
+                        ? () => syncPreviewImage(previewImageIndex + 1)
+                        : undefined
+                }
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setPreviewImage(null);
+                        setPreviewImageIndex(null);
+                    }
+                }}
+            />
             <div className='mx-auto flex h-full w-full max-w-[1800px] flex-col gap-3'>
                 <header className='flex shrink-0 items-center justify-between gap-4 border-b border-white/10 pb-3'>
                     <div className='flex min-w-0 items-center gap-3'>
@@ -312,7 +371,7 @@ export default function HistoryDetailPage() {
                     </div>
                 </header>
 
-                <section className='grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-none 2xl:grid-cols-[minmax(0,1fr)_460px]'>
+                <section className='grid min-h-0 flex-1 grid-rows-[minmax(0,1.25fr)_minmax(0,0.75fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-none 2xl:grid-cols-[minmax(0,1fr)_420px]'>
                     <div className='flex min-h-0 flex-col rounded-lg border border-white/10 bg-black p-3'>
                         <div className='flex shrink-0 items-center justify-between gap-3 pb-3'>
                             <div className='min-w-0'>
@@ -328,7 +387,15 @@ export default function HistoryDetailPage() {
                         <div className='relative min-h-0 flex-1 overflow-hidden rounded-md bg-neutral-950'>
                             {selectedImage?.src ? (
                                 <>
-                                    <div className='relative h-full w-full'>
+                                    <button
+                                        type='button'
+                                        onClick={() =>
+                                            openPreview(selectedImage.src, selectedImage.filename, selectedImage.index)
+                                        }
+                                        className='relative h-full w-full cursor-zoom-in'
+                                        aria-label={t('output.previewImageAria', {
+                                            filename: selectedImage.filename
+                                        })}>
                                         <Image
                                             src={selectedImage.src}
                                             alt={t('output.generatedGridAlt', { index: selectedImage.index + 1 })}
@@ -338,7 +405,7 @@ export default function HistoryDetailPage() {
                                             priority
                                             unoptimized
                                         />
-                                    </div>
+                                    </button>
                                     <div className='absolute right-3 bottom-3 flex items-center gap-2'>
                                         <Button
                                             asChild

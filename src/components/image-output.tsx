@@ -54,6 +54,7 @@ export function ImageOutput({
 }: ImageOutputProps) {
     const { t } = useI18n();
     const [previewImage, setPreviewImage] = React.useState<PreviewImage | null>(null);
+    const [previewIndex, setPreviewIndex] = React.useState<number | null>(null);
     const elapsedLabel = t('output.elapsed', { time: formatElapsedTime(elapsedSeconds) });
     const selectedImage = typeof viewMode === 'number' && imageBatch ? imageBatch[viewMode] : null;
     const activePrompt = promptText?.trim();
@@ -66,6 +67,15 @@ export function ImageOutput({
     };
 
     const openPreview = (img: ImageInfo, index?: number) => {
+        if (typeof index === 'number') {
+            setPreviewIndex(index);
+        } else if (imageBatch) {
+            const resolvedIndex = imageBatch.findIndex((item) => item.filename === img.filename);
+            setPreviewIndex(resolvedIndex >= 0 ? resolvedIndex : 0);
+        } else {
+            setPreviewIndex(0);
+        }
+
         setPreviewImage({
             src: img.path,
             filename: img.filename,
@@ -77,6 +87,21 @@ export function ImageOutput({
                       })
         });
     };
+
+    const syncPreviewImage = React.useCallback(
+        (index: number) => {
+            if (!imageBatch?.length) return;
+            const normalizedIndex = (index + imageBatch.length) % imageBatch.length;
+            const nextImage = imageBatch[normalizedIndex];
+            setPreviewIndex(normalizedIndex);
+            setPreviewImage({
+                src: nextImage.path,
+                filename: nextImage.filename,
+                alt: t('output.generatedGridAlt', { index: normalizedIndex + 1 })
+            });
+        },
+        [imageBatch, t]
+    );
 
     const showCarousel = imageBatch && imageBatch.length > 1;
     const isSingleImageView = typeof viewMode === 'number';
@@ -99,8 +124,23 @@ export function ImageOutput({
             <ImagePreviewDialog
                 image={previewImage}
                 open={!!previewImage}
+                currentIndex={previewIndex ?? undefined}
+                totalCount={imageBatch?.length}
+                onPrevious={
+                    imageBatch && imageBatch.length > 1 && previewIndex !== null
+                        ? () => syncPreviewImage(previewIndex - 1)
+                        : undefined
+                }
+                onNext={
+                    imageBatch && imageBatch.length > 1 && previewIndex !== null
+                        ? () => syncPreviewImage(previewIndex + 1)
+                        : undefined
+                }
                 onOpenChange={(open) => {
-                    if (!open) setPreviewImage(null);
+                    if (!open) {
+                        setPreviewImage(null);
+                        setPreviewIndex(null);
+                    }
                 }}
             />
             <div className='relative flex h-full w-full flex-grow items-center justify-center overflow-hidden'>

@@ -146,6 +146,7 @@ function formatContentType(contentType?: string | null): string {
 }
 
 const CLIENT_SESSION_ID_STORAGE_KEY = 'gpt-image-2-webui-client-session-id';
+const SETTINGS_AUTO_OPENED_SESSION_KEY = 'gpt-image-2-webui-settings-auto-opened';
 
 function createClientTraceId(prefix: string): string {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -215,6 +216,7 @@ export default function HomePage() {
     const [showPreferences, setShowPreferences] = React.useState(false);
     const [showHelpDialog, setShowHelpDialog] = React.useState(false);
     const [showMobileSettings, setShowMobileSettings] = React.useState(false);
+    const didAutoOpenPreferencesRef = React.useRef(false);
 
     const allDbImages = useLiveQuery<ImageRecord[] | undefined>(
         () =>
@@ -228,7 +230,7 @@ export default function HomePage() {
     const [editSourceImagePreviewUrls, setEditSourceImagePreviewUrls] = React.useState<string[]>([]);
     const [editPrompt, setEditPrompt] = React.useState('');
     const [editN, setEditN] = React.useState([1]);
-    const [editSize, setEditSize] = React.useState<EditingFormData['size']>('square');
+    const [editSize, setEditSize] = React.useState<EditingFormData['size']>('portrait');
     const [editCustomWidth, setEditCustomWidth] = React.useState<number>(1024);
     const [editCustomHeight, setEditCustomHeight] = React.useState<number>(1024);
     const [editQuality, setEditQuality] = React.useState<EditingFormData['quality']>('auto');
@@ -269,7 +271,7 @@ export default function HomePage() {
 
     const [genPrompt, setGenPrompt] = React.useState('');
     const [genN, setGenN] = React.useState([1]);
-    const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('square');
+    const [genSize, setGenSize] = React.useState<GenerationFormData['size']>('portrait');
     const [genCustomWidth, setGenCustomWidth] = React.useState<number>(1024);
     const [genCustomHeight, setGenCustomHeight] = React.useState<number>(1024);
     const [genQuality, setGenQuality] = React.useState<GenerationFormData['quality']>('auto');
@@ -289,7 +291,7 @@ export default function HomePage() {
     const resetCurrentParameters = () => {
         if (mode === 'edit') {
             setEditN([1]);
-            setEditSize('square');
+            setEditSize('portrait');
             setEditCustomWidth(1024);
             setEditCustomHeight(1024);
             setEditQuality('auto');
@@ -298,11 +300,11 @@ export default function HomePage() {
         }
 
         setGenN([1]);
-        setGenSize('square');
+        setGenSize('portrait');
         setGenCustomWidth(1024);
         setGenCustomHeight(1024);
         setGenQuality('auto');
-        setGenOutputFormat('png');
+        setGenOutputFormat('webp');
         setGenCompression([100]);
         setGenBackground('auto');
         setGenModeration('auto');
@@ -352,6 +354,29 @@ export default function HomePage() {
 
         return () => window.clearInterval(intervalId);
     }, [activeRequestStartedAt, isLoading]);
+
+    React.useEffect(() => {
+        if (!isAuthReady || didAutoOpenPreferencesRef.current) {
+            return;
+        }
+
+        try {
+            if (window.sessionStorage.getItem(SETTINGS_AUTO_OPENED_SESSION_KEY) === '1') {
+                didAutoOpenPreferencesRef.current = true;
+                return;
+            }
+        } catch {
+            // Ignore sessionStorage access issues and fall back to in-memory behavior.
+        }
+
+        didAutoOpenPreferencesRef.current = true;
+        try {
+            window.sessionStorage.setItem(SETTINGS_AUTO_OPENED_SESSION_KEY, '1');
+        } catch {
+            // Ignore sessionStorage write issues and keep the current-page behavior.
+        }
+        setShowPreferences(true);
+    }, [isAuthReady]);
 
     React.useEffect(() => {
         if (allDbImages === undefined) {
