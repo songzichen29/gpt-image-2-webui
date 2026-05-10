@@ -164,8 +164,12 @@ async function loadMinioHistory(request: NextRequest, image2UserId?: number): Pr
         const timestamp = Number.parseInt(fileName.replace(/\.json$/i, ''), 10);
         if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
         if (since !== null && timestamp < since) continue;
-        const metadata = await readJsonFromMinio<ImageHistoryItem>(name);
-        if (metadata?.timestamp === timestamp) history.push(metadata);
+        try {
+            const metadata = await readJsonFromMinio<ImageHistoryItem>(name);
+            if (metadata?.timestamp === timestamp) history.push(metadata);
+        } catch (error) {
+            console.warn(`Failed to read MinIO history metadata ${name}:`, error);
+        }
     }
 
     return history.sort((left, right) => (sortOrder === 'asc' ? left.timestamp - right.timestamp : right.timestamp - left.timestamp));

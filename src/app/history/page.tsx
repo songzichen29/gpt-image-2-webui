@@ -17,9 +17,11 @@ const explicitModeClient = process.env.NEXT_PUBLIC_IMAGE_STORAGE_MODE;
 const vercelEnvClient = process.env.NEXT_PUBLIC_VERCEL_ENV;
 const isOnVercelClient = vercelEnvClient === 'production' || vercelEnvClient === 'preview';
 
-const effectiveStorageModeClient: 'fs' | 'indexeddb' =
+const effectiveStorageModeClient: 'fs' | 'indexeddb' | 'minio' =
     explicitModeClient === 'fs'
         ? 'fs'
+        : explicitModeClient === 'minio'
+          ? 'minio'
         : explicitModeClient === 'indexeddb'
           ? 'indexeddb'
           : isOnVercelClient
@@ -65,7 +67,7 @@ export default function HistoryPage() {
     );
 
     React.useEffect(() => {
-        if (effectiveStorageModeClient !== 'fs') {
+        if (effectiveStorageModeClient !== 'fs' && effectiveStorageModeClient !== 'minio') {
             setServerHistory([]);
             return;
         }
@@ -134,7 +136,7 @@ export default function HistoryPage() {
                                 status: 'completed',
                                 durationMs: item.durationMs || serverItem.durationMs,
                                 output_format: item.output_format || serverItem.output_format,
-                                storageModeUsed: 'minio'
+                                storageModeUsed: serverItem.storageModeUsed || item.storageModeUsed || effectiveStorageModeClient
                             };
                         })
                     );
@@ -181,7 +183,7 @@ export default function HistoryPage() {
                     status: 'completed' as const,
                     durationMs: item.durationMs || serverItem.durationMs,
                     output_format: item.output_format || serverItem.output_format,
-                    storageModeUsed: 'minio' as const
+                    storageModeUsed: serverItem.storageModeUsed || item.storageModeUsed || effectiveStorageModeClient
                 };
             }
 
@@ -276,7 +278,10 @@ export default function HistoryPage() {
                 await db.images.where('userId').equals(activeImageUserId).delete();
             }
 
-            if (effectiveStorageModeClient === 'fs' && filenamesToDelete.length > 0) {
+            if (
+                (effectiveStorageModeClient === 'fs' || effectiveStorageModeClient === 'minio') &&
+                filenamesToDelete.length > 0
+            ) {
                 const apiPayload: { filenames: string[]; passwordHash?: string } = {
                     filenames: filenamesToDelete
                 };
@@ -447,4 +452,3 @@ export default function HistoryPage() {
         </main>
     );
 }
-

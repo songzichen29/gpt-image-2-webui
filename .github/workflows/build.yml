@@ -35,6 +35,8 @@ jobs:
         run: npm run lint
 
       - name: Build
+        env:
+          NEXT_PUBLIC_IMAGE_STORAGE_MODE: minio
         run: npm run build
 
   docker:
@@ -84,5 +86,7 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
+          build-args: |
+            NEXT_PUBLIC_IMAGE_STORAGE_MODE=minio
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

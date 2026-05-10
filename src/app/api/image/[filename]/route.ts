@@ -2,13 +2,13 @@ import { createReadStream } from 'fs';
 import fs from 'fs/promises';
 import { lookup } from 'mime-types';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageFilePath, getImageStorageMode, getMinioImageBuffer } from '@/lib/server/image-storage';
+import { getImageFilePath, getImageStorageMode, getMinioImageBuffer, isValidImageFilename } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
     const { filename } = await params;
 
-    if (!filename) {
+    if (!isValidImageFilename(filename)) {
         return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
 

@@ -250,6 +250,7 @@ export default function HistoryDetailPage() {
     }
 
     const storageMode = item.storageModeUsed || 'fs';
+    const isServerStorage = storageMode === 'fs' || storageMode === 'minio';
     const model = (item.model || 'gpt-image-1') as GptImageModel;
     const rates = getModelRates(model);
     const imageCount = item.images?.length ?? 0;
@@ -273,7 +274,7 @@ export default function HistoryDetailPage() {
         [t('history.mod'), formatOptionLabel(item.moderation, t)],
         [t('common.outputFormat'), (item.output_format || 'png').toUpperCase()],
         [t('history.outputCompression'), item.output_compression === undefined ? '-' : `${item.output_compression}%`],
-        [t('history.storageMode'), storageMode === 'fs' ? t('history.storageFile') : t('history.storageDb')],
+        [t('history.storageMode'), isServerStorage ? t('history.storageFile') : t('history.storageDb')],
         [t('history.serverExpiryAt'), expiresAtText],
         [t('history.imageCount'), imageCount.toLocaleString()],
         [t('history.sourceImages'), item.sourceImageCount?.toLocaleString() ?? '-'],
@@ -499,12 +500,12 @@ export default function HistoryDetailPage() {
                                 <div className='mb-2 flex items-center justify-between gap-3'>
                                     <h2 className='text-sm font-medium text-white'>{t('history.requestSettings')}</h2>
                                     <div className='flex items-center gap-1 text-xs text-white/45'>
-                                        {storageMode === 'fs' ? (
+                                        {isServerStorage ? (
                                             <HardDrive className='h-4 w-4 text-neutral-400' />
                                         ) : (
                                             <Database className='h-4 w-4 text-blue-400' />
                                         )}
-                                        {storageMode === 'fs' ? t('history.storageFile') : t('history.storageDb')}
+                                        {isServerStorage ? t('history.storageFile') : t('history.storageDb')}
                                     </div>
                                 </div>
                                 <dl className='grid grid-cols-2 gap-2 text-xs xl:grid-cols-3'>

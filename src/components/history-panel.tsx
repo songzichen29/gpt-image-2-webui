@@ -227,6 +227,7 @@ function HistoryPanelImpl({
                             const isError = item.status === 'error';
                             const itemKey = item.timestamp;
                             const originalStorageMode = item.storageModeUsed || 'fs';
+                            const isServerStorage = originalStorageMode === 'fs' || originalStorageMode === 'minio';
                             const outputFormat = item.output_format || 'png';
                             const generatedDate = new Date(item.timestamp).toLocaleString();
                             const detailHref = `/history/${item.timestamp}`;
@@ -239,7 +240,7 @@ function HistoryPanelImpl({
                                     index,
                                     src:
                                         getImageSrc(imageInfo.filename) ??
-                                        (originalStorageMode === 'fs' && isImageCacheReady
+                                        (isServerStorage && isImageCacheReady
                                             ? `/api/image/${imageInfo.filename}`
                                             : undefined)
                                 }));
@@ -346,12 +347,12 @@ function HistoryPanelImpl({
                                             {formatOptionLabel(item.quality, t)}
                                         </span>
                                         <span className='flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 dark:border-white/10'>
-                                            {originalStorageMode === 'fs' ? (
+                                            {isServerStorage ? (
                                                 <HardDrive size={11} />
                                             ) : (
                                                 <Database size={11} />
                                             )}
-                                            {originalStorageMode === 'fs'
+                                            {isServerStorage
                                                 ? t('history.storageFile')
                                                 : t('history.storageDb')}
                                         </span>

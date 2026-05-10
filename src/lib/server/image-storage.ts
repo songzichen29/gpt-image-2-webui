@@ -109,7 +109,12 @@ export async function ensureMinioBucketExists(): Promise<void> {
         })();
     }
 
-    await minioBucketReady;
+    try {
+        await minioBucketReady;
+    } catch (error) {
+        minioBucketReady = null;
+        throw error;
+    }
 }
 
 export async function uploadImageToMinio(

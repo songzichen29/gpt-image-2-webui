@@ -8,7 +8,8 @@ import {
     getImageHistoryMetaPath,
     getImageHistoryObjectKey,
     getImageStorageMode,
-    isValidImageFilename
+    isValidImageFilename,
+    listMinioObjectNames
 } from '@/lib/server/image-storage';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
@@ -26,6 +27,10 @@ type FileDeletionResult = {
     success: boolean;
     error?: string;
 };
+
+function getMinioAuxiliaryPrefix(kind: '.sources' | '.masks', timestamp: number, userId?: number): string {
+    return `${userId ? String(userId) : 'legacy'}/${kind}/${timestamp}-`;
+}
 
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/image-delete');
@@ -106,6 +111,11 @@ export async function POST(request: NextRequest) {
         try {
             if (storageMode === 'minio') {
                 await deleteMinioObjectByKey(getImageHistoryObjectKey(timestamp, image2UserId));
+                const auxiliaryObjectNames = [
+                    ...(await listMinioObjectNames(getMinioAuxiliaryPrefix('.sources', timestamp, image2UserId))),
+                    ...(await listMinioObjectNames(getMinioAuxiliaryPrefix('.masks', timestamp, image2UserId)))
+                ];
+                await Promise.all(auxiliaryObjectNames.map((objectName) => deleteMinioObjectByKey(objectName)));
             } else {
                 await fs.unlink(getImageHistoryMetaPath(timestamp, image2UserId));
             }

@@ -664,6 +664,7 @@ export async function POST(request: NextRequest) {
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
                             let lastPartialB64Json: string | undefined;
+                            const acceptedCompletedImageHashes = new Set<string>();
 
                             for await (const event of stream) {
                                 const eventType = getStreamEventType(event);
@@ -684,6 +685,33 @@ export async function POST(request: NextRequest) {
                                         break;
                                     }
                                 } else if (isCompletedImageStreamEvent(event)) {
+                                    if (!b64Json) {
+                                        console.log('Streaming: Ignored completed event without image data:', {
+                                            type: eventType || 'unknown',
+                                            keys: getStreamEventKeys(event)
+                                        });
+                                        continue;
+                                    }
+
+                                    if (completedImages.length >= requestedImageCount) {
+                                        console.log('Streaming: Ignored extra completed image event:', {
+                                            type: eventType || 'unknown',
+                                            requestedImageCount
+                                        });
+                                        finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
+                                        continue;
+                                    }
+
+                                    const completedImageHash = sha256(b64Json);
+                                    if (acceptedCompletedImageHashes.has(completedImageHash)) {
+                                        console.log('Streaming: Ignored duplicate completed image event:', {
+                                            type: eventType || 'unknown'
+                                        });
+                                        finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
+                                        continue;
+                                    }
+                                    acceptedCompletedImageHashes.add(completedImageHash);
+
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
                                     const revisedPrompt = getStreamEventRevisedPrompt(event);
@@ -1016,6 +1044,7 @@ export async function POST(request: NextRequest) {
                             let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
                             let imageIndex = 0;
                             let lastPartialB64Json: string | undefined;
+                            const acceptedCompletedImageHashes = new Set<string>();
 
                             for await (const event of stream) {
                                 const eventType = getStreamEventType(event);
@@ -1036,6 +1065,33 @@ export async function POST(request: NextRequest) {
                                         break;
                                     }
                                 } else if (isCompletedImageStreamEvent(event)) {
+                                    if (!b64Json) {
+                                        console.log('Streaming edit: Ignored completed event without image data:', {
+                                            type: eventType || 'unknown',
+                                            keys: getStreamEventKeys(event)
+                                        });
+                                        continue;
+                                    }
+
+                                    if (completedImages.length >= requestedImageCount) {
+                                        console.log('Streaming edit: Ignored extra completed image event:', {
+                                            type: eventType || 'unknown',
+                                            requestedImageCount
+                                        });
+                                        finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
+                                        continue;
+                                    }
+
+                                    const completedImageHash = sha256(b64Json);
+                                    if (acceptedCompletedImageHashes.has(completedImageHash)) {
+                                        console.log('Streaming edit: Ignored duplicate completed image event:', {
+                                            type: eventType || 'unknown'
+                                        });
+                                        finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
+                                        continue;
+                                    }
+                                    acceptedCompletedImageHashes.add(completedImageHash);
+
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
                                     const revisedPrompt = getStreamEventRevisedPrompt(event);
