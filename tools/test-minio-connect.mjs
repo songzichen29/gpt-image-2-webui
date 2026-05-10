@@ -32,45 +32,29 @@ async function loadDotEnv() {
   } catch {}
 }
 
+function getEnv(name, fallback = '') {
+  return (process.env[name] || fallback).trim();
+}
+
 function maskSecret(value) {
   if (!value) return '(empty)';
   if (value.length <= 8) return `${value.slice(0, 2)}***`;
   return `${value.slice(0, 4)}***${value.slice(-4)}`;
 }
 
-function buildMinioClientFromEnv() {
-  const serverUrl = process.env.MINIO_SERVER_URL?.trim();
-  const accessKey = process.env.MINIO_ROOT_USER?.trim();
-  const secretKey = process.env.MINIO_ROOT_PASSWORD?.trim();
-
-  if (!serverUrl || !accessKey || !secretKey) {
-    throw new Error('MINIO_SERVER_URL / MINIO_ROOT_USER / MINIO_ROOT_PASSWORD 缺失');
-  }
-
+function createClientFromUrl(serverUrl) {
   const parsedUrl = new URL(serverUrl);
   const useSSL = parsedUrl.protocol === 'https:';
   const port = parsedUrl.port ? Number.parseInt(parsedUrl.port, 10) : useSSL ? 443 : 80;
 
-  return {
-    config: {
-      serverUrl,
-      endPoint: parsedUrl.hostname,
-      port,
-      useSSL,
-      accessKey,
-      secretKey,
-      region: process.env.MINIO_REGION?.trim() || undefined,
-      bucketName: process.env.MINIO_BUCKET_NAME?.trim() || 'gpt-image-2-webui',
-    },
-    client: new MinioClient({
-      endPoint: parsedUrl.hostname,
-      port,
-      useSSL,
-      accessKey,
-      secretKey,
-      region: process.env.MINIO_REGION?.trim() || undefined,
-    }),
-  };
+  return new MinioClient({
+    endPoint: parsedUrl.hostname,
+    port,
+    useSSL,
+    accessKey: getEnv('MINIO_ROOT_USER'),
+    secretKey: getEnv('MINIO_ROOT_PASSWORD'),
+    region: getEnv('MINIO_REGION') || undefined,
+  });
 }
 
 function printHeader(title) {
@@ -129,18 +113,17 @@ async function runStep(name, fn) {
   }
 }
 
-async function main() {
-  await loadDotEnv();
-
-  const { config, client } = buildMinioClientFromEnv();
-  const bucketName = config.bucketName;
+async function runCase(label, serverUrl) {
+  const bucketName = getEnv('MINIO_BUCKET_NAME', 'gpt-image-2-webui');
+  const client = createClientFromUrl(serverUrl);
   const objectKey =
     process.env.TEST_MINIO_OBJECT_KEY?.trim() ||
-    `_healthchecks/${Date.now()}-${crypto.randomUUID()}.txt`;
+    `_healthchecks/${label}/${Date.now()}-${crypto.randomUUID()}.txt`;
   const payload = Buffer.from(
     JSON.stringify(
       {
         kind: 'gpt-image-2-webui-minio-healthcheck',
+        label,
         time: new Date().toISOString(),
         objectKey,
       },
@@ -151,43 +134,40 @@ async function main() {
   );
   const payloadSha256 = crypto.createHash('sha256').update(payload).digest('hex');
 
-  printHeader('Env');
+  printHeader(`Env (${label})`);
   console.dir(
     {
-      MINIO_SERVER_URL: config.serverUrl,
-      MINIO_END_POINT: config.endPoint,
-      MINIO_PORT: config.port,
-      MINIO_USE_SSL: config.useSSL,
-      MINIO_REGION: config.region || '(unset)',
+      MINIO_SERVER_URL: serverUrl,
+      MINIO_REGION: getEnv('MINIO_REGION') || '(unset)',
       MINIO_BUCKET_NAME: bucketName,
-      MINIO_ROOT_USER: config.accessKey,
-      MINIO_ROOT_PASSWORD: maskSecret(config.secretKey),
+      MINIO_ROOT_USER: getEnv('MINIO_ROOT_USER'),
+      MINIO_ROOT_PASSWORD: maskSecret(getEnv('MINIO_ROOT_PASSWORD')),
       TEST_MINIO_OBJECT_KEY: objectKey,
     },
     { depth: 5 },
   );
 
-  const bucketExistsResult = await runStep('bucketExists', async () => {
+  const bucketExistsResult = await runStep(`bucketExists (${label})`, async () => {
     const exists = await client.bucketExists(bucketName);
     return { exists, bucketName };
   });
-  if (!bucketExistsResult.ok) return process.exitCode = 1;
+  if (!bucketExistsResult.ok) return false;
 
   if (!bucketExistsResult.result.exists) {
     const shouldCreateBucket = process.env.TEST_MINIO_CREATE_BUCKET === 'true';
     if (!shouldCreateBucket) {
       console.error(`\nBucket ${bucketName} 不存在。若要自动创建，请设置 TEST_MINIO_CREATE_BUCKET=true`);
-      return process.exitCode = 1;
+      return false;
     }
 
-    const createResult = await runStep('makeBucket', async () => {
-      await client.makeBucket(bucketName, config.region);
-      return { bucketName, region: config.region || '(default)' };
+    const createResult = await runStep(`makeBucket (${label})`, async () => {
+      await client.makeBucket(bucketName, getEnv('MINIO_REGION') || undefined);
+      return { bucketName, region: getEnv('MINIO_REGION') || '(default)' };
     });
-    if (!createResult.ok) return process.exitCode = 1;
+    if (!createResult.ok) return false;
   }
 
-  const putResult = await runStep('putObject', async () => {
+  const putResult = await runStep(`putObject (${label})`, async () => {
     await client.putObject(bucketName, objectKey, payload, undefined, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache',
@@ -199,9 +179,9 @@ async function main() {
       payloadSha256,
     };
   });
-  if (!putResult.ok) return process.exitCode = 1;
+  if (!putResult.ok) return false;
 
-  const statResult = await runStep('statObject', async () => {
+  const statResult = await runStep(`statObject (${label})`, async () => {
     const stat = await client.statObject(bucketName, objectKey);
     return {
       size: stat.size,
@@ -211,9 +191,9 @@ async function main() {
       metaData: stat.metaData,
     };
   });
-  if (!statResult.ok) return process.exitCode = 1;
+  if (!statResult.ok) return false;
 
-  const getResult = await runStep('getObject', async () => {
+  const getResult = await runStep(`getObject (${label})`, async () => {
     const stream = await client.getObject(bucketName, objectKey);
     const downloaded = await readObjectFully(stream);
     const downloadedSha256 = crypto.createHash('sha256').update(downloaded).digest('hex');
@@ -224,16 +204,43 @@ async function main() {
       preview: downloaded.toString('utf8').slice(0, 200),
     };
   });
-  if (!getResult.ok) return process.exitCode = 1;
+  if (!getResult.ok) return false;
 
-  const removeResult = await runStep('removeObject', async () => {
+  const removeResult = await runStep(`removeObject (${label})`, async () => {
     await client.removeObject(bucketName, objectKey);
     return { removed: true, objectKey };
   });
-  if (!removeResult.ok) return process.exitCode = 1;
+  if (!removeResult.ok) return false;
+
+  return true;
+}
+
+async function main() {
+  await loadDotEnv();
+
+  const publicUrl = getEnv('MINIO_SERVER_URL');
+  const internalUrl = getEnv('MINIO_INTERNAL_SERVER_URL');
+
+  if (!publicUrl) {
+    throw new Error('MINIO_SERVER_URL 缺失');
+  }
+
+  if (!getEnv('MINIO_ROOT_USER') || !getEnv('MINIO_ROOT_PASSWORD')) {
+    throw new Error('MINIO_ROOT_USER / MINIO_ROOT_PASSWORD 缺失');
+  }
+
+  let allPassed = true;
+  allPassed = (await runCase('public', publicUrl)) && allPassed;
+
+  if (internalUrl) {
+    allPassed = (await runCase('internal', internalUrl)) && allPassed;
+  } else {
+    console.log('\n[internal] skipped: MINIO_INTERNAL_SERVER_URL is empty');
+  }
 
   printHeader('Summary');
-  console.log('MinIO 连接 / bucket / 上传 / 读取 / 删除 全部通过。');
+  console.log(allPassed ? 'MinIO 检查全部通过。' : 'MinIO 检查存在失败项。');
+  process.exitCode = allPassed ? 0 : 1;
 }
 
 main().catch((error) => {

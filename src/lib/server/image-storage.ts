@@ -70,7 +70,7 @@ export function getImageMaskObjectKey(filename: string, userId?: number, timesta
 }
 
 function getMinioClient(): MinioClient | null {
-    const serverUrl = process.env.MINIO_SERVER_URL?.trim();
+    const serverUrl = (process.env.MINIO_INTERNAL_SERVER_URL || process.env.MINIO_SERVER_URL)?.trim();
     const accessKey = process.env.MINIO_ROOT_USER?.trim();
     const secretKey = process.env.MINIO_ROOT_PASSWORD?.trim();
 
