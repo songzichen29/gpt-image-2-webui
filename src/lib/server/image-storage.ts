@@ -207,11 +207,25 @@ export async function getMinioImageBuffer(filename: string, userId?: number): Pr
     if (!client) return null;
 
     await ensureMinioBucketExists();
-    const stream = await client.getObject(minioBucketName, getImageObjectKey(filename, userId));
+    const objectKey = getImageObjectKey(filename, userId);
+
+    let stream;
+    try {
+        stream = await client.getObject(minioBucketName, objectKey);
+    } catch (error) {
+        console.error(`MinIO getObject failed for ${objectKey}:`, error);
+        throw error;
+    }
+
     const chunks: Buffer[] = [];
 
-    for await (const chunk of stream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    try {
+        for await (const chunk of stream) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+    } catch (error) {
+        console.error(`MinIO stream read failed for ${objectKey}:`, error);
+        throw error;
     }
 
     return chunks.length > 0 ? Buffer.concat(chunks) : null;

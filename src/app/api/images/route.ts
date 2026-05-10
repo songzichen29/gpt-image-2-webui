@@ -225,6 +225,8 @@ type ImageStreamEventLike = {
     partial_image_index?: unknown;
     usage?: unknown;
     revised_prompt?: unknown;
+    item?: unknown;
+    response?: unknown;
 };
 
 function getStreamEventType(event: unknown): string {
@@ -239,14 +241,89 @@ function getStreamEventKeys(event: unknown): string[] {
     return event && typeof event === 'object' ? Object.keys(event) : [];
 }
 
+function getImageGenerationCallPayloadFromStreamEvent(event: unknown): Record<string, unknown> | undefined {
+    if (!event || typeof event !== 'object') {
+        return undefined;
+    }
+
+    const eventType = getStreamEventType(event);
+
+    if (eventType === 'response.output_item.done' && 'item' in event) {
+        const item = (event as ImageStreamEventLike).item;
+        if (item && typeof item === 'object' && 'type' in item && item.type === 'image_generation_call') {
+            return item as Record<string, unknown>;
+        }
+    }
+
+    if ((eventType === 'response.completed' || eventType === 'response.done') && 'response' in event) {
+        const response = (event as ImageStreamEventLike).response;
+        if (!response || typeof response !== 'object' || !('output' in response) || !Array.isArray(response.output)) {
+            return undefined;
+        }
+
+        const match = response.output.find(
+            (item) =>
+                item &&
+                typeof item === 'object' &&
+                'type' in item &&
+                item.type === 'image_generation_call' &&
+                'result' in item &&
+                typeof item.result === 'string' &&
+                item.result
+        );
+
+        return match && typeof match === 'object' ? (match as Record<string, unknown>) : undefined;
+    }
+
+    return undefined;
+}
+
 function getStreamEventB64Json(event: unknown): string | undefined {
     if (!event || typeof event !== 'object' || !('b64_json' in event)) {
-        return undefined;
+        const payload = getImageGenerationCallPayloadFromStreamEvent(event);
+        const nestedResult = payload?.result;
+        return typeof nestedResult === 'string' && nestedResult ? nestedResult : undefined;
     }
 
     const b64Json = (event as ImageStreamEventLike).b64_json;
 
     return typeof b64Json === 'string' && b64Json ? b64Json : undefined;
+}
+
+function getStreamEventRevisedPrompt(event: unknown): string | undefined {
+    if (event && typeof event === 'object' && 'revised_prompt' in event) {
+        const revisedPrompt = (event as ImageStreamEventLike).revised_prompt;
+        if (typeof revisedPrompt === 'string' && revisedPrompt.trim()) {
+            return revisedPrompt;
+        }
+    }
+
+    const payload = getImageGenerationCallPayloadFromStreamEvent(event);
+    const nestedPrompt = payload?.revised_prompt;
+    return typeof nestedPrompt === 'string' && nestedPrompt.trim() ? nestedPrompt : undefined;
+}
+
+function getStreamEventUsage(event: unknown): OpenAI.Images.ImagesResponse['usage'] | undefined {
+    if (event && typeof event === 'object' && 'usage' in event) {
+        const usage = (event as ImageStreamEventLike).usage;
+        if (usage && typeof usage === 'object') {
+            return usage as OpenAI.Images.ImagesResponse['usage'];
+        }
+    }
+
+    if (
+        event &&
+        typeof event === 'object' &&
+        'response' in event &&
+        (getStreamEventType(event) === 'response.completed' || getStreamEventType(event) === 'response.done')
+    ) {
+        const response = (event as ImageStreamEventLike).response;
+        if (response && typeof response === 'object' && 'usage' in response && response.usage && typeof response.usage === 'object') {
+            return response.usage as OpenAI.Images.ImagesResponse['usage'];
+        }
+    }
+
+    return undefined;
 }
 
 function getStreamEventPartialImageIndex(event: unknown): number | undefined {
@@ -267,6 +344,14 @@ function isPartialImageStreamEvent(event: unknown): boolean {
 
 function isCompletedImageStreamEvent(event: unknown): boolean {
     const eventType = getStreamEventType(event);
+
+    if (eventType === 'response.output_item.done') {
+        return Boolean(getStreamEventB64Json(event));
+    }
+
+    if (eventType === 'response.completed' || eventType === 'response.done') {
+        return Boolean(getStreamEventB64Json(event));
+    }
 
     return eventType.includes('completed') || Boolean(getStreamEventB64Json(event) && !isPartialImageStreamEvent(event));
 }
@@ -601,7 +686,7 @@ export async function POST(request: NextRequest) {
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
-                                    const revisedPrompt = getRevisedPrompt(event);
+                                    const revisedPrompt = getStreamEventRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
@@ -643,9 +728,7 @@ export async function POST(request: NextRequest) {
                                     imageIndex++;
 
                                     // Capture usage from completed event if available
-                                    if ('usage' in event && event.usage) {
-                                        finalUsage = event.usage as OpenAI.Images.ImagesResponse['usage'];
-                                    }
+                                    finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
                                 } else {
                                     console.log('Streaming: Ignored image generation event:', {
                                         type: eventType || 'unknown',
@@ -955,7 +1038,7 @@ export async function POST(request: NextRequest) {
                                 } else if (isCompletedImageStreamEvent(event)) {
                                     const currentIndex = imageIndex;
                                     const filename = `${timestamp}-${currentIndex}.${fileExtension}`;
-                                    const revisedPrompt = getRevisedPrompt(event);
+                                    const revisedPrompt = getStreamEventRevisedPrompt(event);
 
                                     // Save to filesystem if in fs mode
                                     if (effectiveStorageMode === 'fs' && b64Json) {
@@ -997,9 +1080,7 @@ export async function POST(request: NextRequest) {
                                     imageIndex++;
 
                                     // Capture usage from completed event if available
-                                    if ('usage' in event && event.usage) {
-                                        finalUsage = event.usage as OpenAI.Images.ImagesResponse['usage'];
-                                    }
+                                    finalUsage = mergeImageUsage(finalUsage, getStreamEventUsage(event));
                                 } else {
                                     console.log('Streaming edit: Ignored image event:', {
                                         type: eventType || 'unknown',

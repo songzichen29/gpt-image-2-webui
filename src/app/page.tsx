@@ -582,6 +582,14 @@ export default function HomePage() {
             return;
         }
 
+        // MinIO 模式下，生成请求本身已经由当前页面直接等待并消费响应；
+        // 这里的“首页自动恢复 pending 任务”主要用于 fs/本地缓存刷新恢复。
+        // 在 MinIO 场景启用这段逻辑会和用户手动发起的请求重叠，导致单次点击出现第二个
+        // /api/images 恢复流、状态相互覆盖，表现为“只点一次却又发起一轮生成/恢复”。
+        if (effectiveStorageModeClient === 'minio') {
+            return;
+        }
+
         const controller = new AbortController();
         setMode(latestHistoryEntry.mode);
         setIsLoading(true);
