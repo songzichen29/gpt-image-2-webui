@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { buildApiImageUrl } from '@/lib/image-url';
 import {
     ensureImageHistoryMetaDirExists,
     ensureImageOutputDirExists,
@@ -691,7 +692,7 @@ async function persistImageApiResult({
             };
 
             if (effectiveStorageMode === 'fs') {
-                imageResult.path = `/api/image/${filename}`;
+                imageResult.path = buildApiImageUrl(filename, requestTimestamp);
             }
 
             return imageResult;
@@ -1173,7 +1174,7 @@ export async function POST(request: NextRequest) {
 
                                     const savedPath =
                                         effectiveStorageMode === 'fs' && b64Json
-                                            ? `/api/image/${filename}`
+                                            ? buildApiImageUrl(filename, timestamp)
                                             : undefined;
                                     const imageData = {
                                         filename,
@@ -1218,7 +1219,7 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
+                                const savedPath = effectiveStorageMode === 'fs' ? buildApiImageUrl(filename, timestamp) : undefined;
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,
@@ -1642,7 +1643,7 @@ export async function POST(request: NextRequest) {
 
                                     const savedPath =
                                         effectiveStorageMode === 'fs' && b64Json
-                                            ? `/api/image/${filename}`
+                                            ? buildApiImageUrl(filename, timestamp)
                                             : undefined;
                                     const imageData = {
                                         filename,
@@ -1687,7 +1688,7 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
+                                const savedPath = effectiveStorageMode === 'fs' ? buildApiImageUrl(filename, timestamp) : undefined;
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,

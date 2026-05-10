@@ -20,6 +20,7 @@ import { useAppSettings } from '@/lib/app-settings';
 import { calculateApiCost, formatUsdCny, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
 import { db, LEGACY_IMAGE_USER_ID, type ImageRecord } from '@/lib/db';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
+import { buildApiImageUrl } from '@/lib/image-url';
 import { getPresetDimensions, validateGptImage2Size } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { RotateCcw } from 'lucide-react';
@@ -544,7 +545,7 @@ export default function HomePage() {
             item.images.map((image) => ({
                 filename: image.filename,
                 output_format: item.output_format || getOutputFormatFromFilename(image.filename),
-                path: `/api/image/${image.filename}`
+                path: buildApiImageUrl(image.filename, item.timestamp)
             }));
 
         const restoreCompletedEntry = async (item: HistoryMetadata) => {
@@ -1367,7 +1368,7 @@ export default function HomePage() {
             } else if (effectiveStorageModeClient === 'indexeddb') {
                 throw new Error(t('page.imageNotFoundLocal', { filename }));
             } else {
-                const response = await fetch(`/api/image/${filename}`);
+                const response = await fetch(buildApiImageUrl(filename), { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(t('page.fetchImageFailed', { statusText: response.statusText }));
                 }

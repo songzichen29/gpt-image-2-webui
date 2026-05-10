@@ -230,6 +230,12 @@ export function unauthorizedImage2Response(request: NextRequest, message = 'Unau
             error: message,
             loginUrl: getSub2ApiLoginUrl(request)
         },
-        { status: 401 }
+        {
+            status: 401,
+            headers: {
+                'Cache-Control': 'no-store, max-age=0',
+                Vary: 'Cookie, Authorization'
+            }
+        }
     );
 }

@@ -18,6 +18,7 @@ import {
 import { formatUsdCny, USD_TO_CNY_RATE } from '@/lib/cost-utils';
 import { formatOptionLabel, useI18n } from '@/lib/i18n';
 import { getServerImageExpiryStatus } from '@/lib/image-retention';
+import { buildApiImageUrl } from '@/lib/image-url';
 import { cn } from '@/lib/utils';
 import {
     Clock,
@@ -241,7 +242,7 @@ function HistoryPanelImpl({
                                     src:
                                         getImageSrc(imageInfo.filename) ??
                                         (isServerStorage && isImageCacheReady
-                                            ? `/api/image/${imageInfo.filename}`
+                                            ? buildApiImageUrl(imageInfo.filename, item.timestamp)
                                             : undefined)
                                 }));
                             const firstPreview = imagePreviews[0];

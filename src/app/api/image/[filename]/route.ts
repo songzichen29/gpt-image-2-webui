@@ -25,6 +25,13 @@ function detectImageContentType(buffer: Buffer, filename: string): string {
     return lookup(filename) || 'application/octet-stream';
 }
 
+const imageResponseHeaders = {
+    'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+    Vary: 'Cookie, Authorization'
+};
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
     const { filename } = await params;
 
@@ -48,23 +55,33 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             return new NextResponse(buffer, {
                 status: 200,
                 headers: {
+                    ...imageResponseHeaders,
                     'Content-Type': detectImageContentType(buffer, filename),
-                    'Cache-Control': 'public, max-age=31536000, immutable'
+                    'Content-Length': buffer.length.toString()
                 }
             });
         }
 
         const filepath = getImageFilePath(filename, image2UserId);
         const fileStats = await fs.stat(filepath);
-        const contentType = lookup(filename) || 'application/octet-stream';
+        const probe = await fs.open(filepath, 'r');
+        const headerBuffer = Buffer.alloc(16);
+        let bytesRead = 0;
+        try {
+            const readResult = await probe.read(headerBuffer, 0, headerBuffer.length, 0);
+            bytesRead = readResult.bytesRead;
+        } finally {
+            await probe.close();
+        }
+        const contentType = detectImageContentType(headerBuffer.subarray(0, bytesRead), filename);
         const fileStream = createReadStream(filepath);
 
         return new NextResponse(fileStream as unknown as ReadableStream, {
             status: 200,
             headers: {
+                ...imageResponseHeaders,
                 'Content-Type': contentType,
-                'Content-Length': fileStats.size.toString(),
-                'Cache-Control': 'private, max-age=31536000, immutable'
+                'Content-Length': fileStats.size.toString()
             }
         });
     } catch (error: unknown) {
