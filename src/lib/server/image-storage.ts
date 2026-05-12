@@ -152,6 +152,17 @@ function isTransientMinioError(error: unknown): boolean {
     );
 }
 
+function isMissingMinioObjectError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        return false;
+    }
+
+    const code = 'code' in error && typeof error.code === 'string' ? error.code : '';
+    const name = 'name' in error && typeof error.name === 'string' ? error.name : '';
+
+    return code === 'NoSuchKey' || code === 'NotFound' || name === 'NoSuchKey';
+}
+
 async function withMinioRetry<T>(operationName: string, run: () => Promise<T>): Promise<T> {
     let lastError: unknown;
 
@@ -289,7 +300,17 @@ export async function readJsonFromMinio<T>(objectKey: string): Promise<T | null>
 
     await ensureMinioBucketExists();
     return withMinioRetry('getObject(json)', async () => {
-        const stream = await client.getObject(minioBucketName, objectKey);
+        let stream;
+        try {
+            stream = await client.getObject(minioBucketName, objectKey);
+        } catch (error) {
+            if (isMissingMinioObjectError(error)) {
+                return null;
+            }
+
+            throw error;
+        }
+
         const chunks: Buffer[] = [];
 
         for await (const chunk of stream) {

@@ -203,6 +203,7 @@ export default function HomePage() {
     const activeApiRequestAbortControllerRef = React.useRef<{ timestamp: number; controller: AbortController } | null>(
         null
     );
+    const pendingRequestStartedLocallyRef = React.useRef<Set<number>>(new Set());
     const recoveredRequestTimestampsRef = React.useRef<Set<number>>(new Set());
     const [isSendingToEdit, setIsSendingToEdit] = React.useState(false);
     const [activeRequestStartedAt, setActiveRequestStartedAt] = React.useState<number | null>(null);
@@ -644,6 +645,14 @@ export default function HomePage() {
             return;
         }
 
+        if (
+            pendingRequestStartedLocallyRef.current.has(latestHistoryEntry.timestamp) &&
+            activeRequestStartedAtRef.current === latestHistoryEntry.timestamp &&
+            apiCallInFlightRef.current
+        ) {
+            return;
+        }
+
         const controller = new AbortController();
         setMode(latestHistoryEntry.mode);
         setIsLoading(true);
@@ -783,6 +792,7 @@ export default function HomePage() {
         setIsLoading(true);
         isLoadingRef.current = true;
         activeRequestStartedAtRef.current = startTime;
+        pendingRequestStartedLocallyRef.current.add(startTime);
         activeApiRequestAbortControllerRef.current = { timestamp: startTime, controller: apiRequestAbortController };
         setActiveRequestStartedAt(startTime);
         setElapsedSeconds(0);
@@ -1416,6 +1426,7 @@ export default function HomePage() {
             if (activeApiRequestAbortControllerRef.current?.timestamp === startTime) {
                 activeApiRequestAbortControllerRef.current = null;
             }
+            pendingRequestStartedLocallyRef.current.delete(startTime);
             if (activeRequestStartedAtRef.current === startTime) {
                 setIsLoading(false);
                 isLoadingRef.current = false;
