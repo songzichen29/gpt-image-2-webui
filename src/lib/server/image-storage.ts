@@ -8,6 +8,8 @@ const minioBucketName = process.env.MINIO_BUCKET_NAME?.trim() || 'gpt-image-2-we
 
 let minioClientInstance: MinioClient | null = null;
 let minioBucketReady: Promise<void> | null = null;
+const MINIO_RETRY_ATTEMPTS = 3;
+const MINIO_RETRY_DELAY_MS = 800;
 
 export function getImageBaseDir(): string {
     return imageBaseDir;
@@ -96,15 +98,68 @@ function getMinioClient(): MinioClient | null {
     return minioClientInstance;
 }
 
+function sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientMinioError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        return false;
+    }
+
+    const code = 'code' in error && typeof error.code === 'string' ? error.code : '';
+    const message = 'message' in error && typeof error.message === 'string' ? error.message.toLowerCase() : '';
+
+    return (
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT' ||
+        code === 'ECONNABORTED' ||
+        code === 'ESOCKETTIMEDOUT' ||
+        message.includes('econnreset') ||
+        message.includes('socket hang up') ||
+        message.includes('timeout') ||
+        message.includes('tls') ||
+        message.includes('connection reset')
+    );
+}
+
+async function withMinioRetry<T>(operationName: string, run: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MINIO_RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await run();
+        } catch (error) {
+            lastError = error;
+            const shouldRetry = attempt < MINIO_RETRY_ATTEMPTS && isTransientMinioError(error);
+
+            console.warn(`[MinIO] ${operationName} failed`, {
+                attempt,
+                maxAttempts: MINIO_RETRY_ATTEMPTS,
+                shouldRetry,
+                error
+            });
+
+            if (!shouldRetry) {
+                throw error;
+            }
+
+            await sleep(MINIO_RETRY_DELAY_MS * attempt);
+        }
+    }
+
+    throw lastError;
+}
+
 export async function ensureMinioBucketExists(): Promise<void> {
     const client = getMinioClient();
     if (!client) return;
 
     if (!minioBucketReady) {
         minioBucketReady = (async () => {
-            const exists = await client.bucketExists(minioBucketName);
+            const exists = await withMinioRetry('bucketExists', () => client.bucketExists(minioBucketName));
             if (!exists) {
-                await client.makeBucket(minioBucketName);
+                await withMinioRetry('makeBucket', () => client.makeBucket(minioBucketName));
             }
         })();
     }
@@ -128,10 +183,12 @@ export async function uploadImageToMinio(
 
     await ensureMinioBucketExists();
     const objectKey = getImageObjectKey(filename, userId);
-    await client.putObject(minioBucketName, objectKey, buffer, undefined, {
-        'Content-Type': contentType || 'application/octet-stream',
-        'Cache-Control': 'public, max-age=31536000, immutable'
-    });
+    await withMinioRetry('putObject(image)', () =>
+        client.putObject(minioBucketName, objectKey, buffer, undefined, {
+            'Content-Type': contentType || 'application/octet-stream',
+            'Cache-Control': 'public, max-age=31536000, immutable'
+        })
+    );
 
     return objectKey;
 }
@@ -145,10 +202,12 @@ export async function uploadBufferToMinioByKey(
     if (!client) throw new Error('MinIO is not configured.');
 
     await ensureMinioBucketExists();
-    await client.putObject(minioBucketName, objectKey, buffer, undefined, {
-        'Content-Type': contentType || 'application/octet-stream',
-        'Cache-Control': 'public, max-age=31536000, immutable'
-    });
+    await withMinioRetry('putObject(buffer)', () =>
+        client.putObject(minioBucketName, objectKey, buffer, undefined, {
+            'Content-Type': contentType || 'application/octet-stream',
+            'Cache-Control': 'public, max-age=31536000, immutable'
+        })
+    );
 }
 
 export async function deleteImageFromMinio(filename: string, userId?: number): Promise<void> {
@@ -156,7 +215,7 @@ export async function deleteImageFromMinio(filename: string, userId?: number): P
     if (!client) return;
 
     await ensureMinioBucketExists();
-    await client.removeObject(minioBucketName, getImageObjectKey(filename, userId));
+    await withMinioRetry('removeObject(image)', () => client.removeObject(minioBucketName, getImageObjectKey(filename, userId)));
 }
 
 export async function deleteMinioObjectByKey(objectKey: string): Promise<void> {
@@ -164,7 +223,7 @@ export async function deleteMinioObjectByKey(objectKey: string): Promise<void> {
     if (!client) return;
 
     await ensureMinioBucketExists();
-    await client.removeObject(minioBucketName, objectKey);
+    await withMinioRetry('removeObject(key)', () => client.removeObject(minioBucketName, objectKey));
 }
 
 export async function getMinioPresignedImageUrl(
@@ -176,7 +235,9 @@ export async function getMinioPresignedImageUrl(
     if (!client) return null;
 
     await ensureMinioBucketExists();
-    return client.presignedGetObject(minioBucketName, getImageObjectKey(filename, userId), expirySeconds);
+    return withMinioRetry('presignedGetObject', () =>
+        client.presignedGetObject(minioBucketName, getImageObjectKey(filename, userId), expirySeconds)
+    );
 }
 
 export async function uploadJsonToMinio(objectKey: string, value: unknown, contentType = 'application/json'): Promise<void> {
@@ -185,10 +246,12 @@ export async function uploadJsonToMinio(objectKey: string, value: unknown, conte
 
     await ensureMinioBucketExists();
     const buffer = Buffer.from(JSON.stringify(value, null, 2), 'utf8');
-    await client.putObject(minioBucketName, objectKey, buffer, undefined, {
-        'Content-Type': contentType,
-        'Cache-Control': 'no-cache'
-    });
+    await withMinioRetry('putObject(json)', () =>
+        client.putObject(minioBucketName, objectKey, buffer, undefined, {
+            'Content-Type': contentType,
+            'Cache-Control': 'no-cache'
+        })
+    );
 }
 
 export async function readJsonFromMinio<T>(objectKey: string): Promise<T | null> {
@@ -196,15 +259,17 @@ export async function readJsonFromMinio<T>(objectKey: string): Promise<T | null>
     if (!client) return null;
 
     await ensureMinioBucketExists();
-    const stream = await client.getObject(minioBucketName, objectKey);
-    const chunks: Buffer[] = [];
+    return withMinioRetry('getObject(json)', async () => {
+        const stream = await client.getObject(minioBucketName, objectKey);
+        const chunks: Buffer[] = [];
 
-    for await (const chunk of stream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
+        for await (const chunk of stream) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
 
-    if (chunks.length === 0) return null;
-    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
+        if (chunks.length === 0) return null;
+        return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
+    });
 }
 
 export async function getMinioImageBuffer(filename: string, userId?: number): Promise<Buffer | null> {
@@ -214,26 +279,28 @@ export async function getMinioImageBuffer(filename: string, userId?: number): Pr
     await ensureMinioBucketExists();
     const objectKey = getImageObjectKey(filename, userId);
 
-    let stream;
-    try {
-        stream = await client.getObject(minioBucketName, objectKey);
-    } catch (error) {
-        console.error(`MinIO getObject failed for ${objectKey}:`, error);
-        throw error;
-    }
-
-    const chunks: Buffer[] = [];
-
-    try {
-        for await (const chunk of stream) {
-            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    return withMinioRetry(`getObject(image:${objectKey})`, async () => {
+        let stream;
+        try {
+            stream = await client.getObject(minioBucketName, objectKey);
+        } catch (error) {
+            console.error(`MinIO getObject failed for ${objectKey}:`, error);
+            throw error;
         }
-    } catch (error) {
-        console.error(`MinIO stream read failed for ${objectKey}:`, error);
-        throw error;
-    }
 
-    return chunks.length > 0 ? Buffer.concat(chunks) : null;
+        const chunks: Buffer[] = [];
+
+        try {
+            for await (const chunk of stream) {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+        } catch (error) {
+            console.error(`MinIO stream read failed for ${objectKey}:`, error);
+            throw error;
+        }
+
+        return chunks.length > 0 ? Buffer.concat(chunks) : null;
+    });
 }
 
 export async function listMinioObjectNames(prefix: string): Promise<string[]> {
@@ -241,14 +308,16 @@ export async function listMinioObjectNames(prefix: string): Promise<string[]> {
     if (!client) return [];
 
     await ensureMinioBucketExists();
-    const names: string[] = [];
-    const stream = client.listObjectsV2(minioBucketName, prefix, true);
+    return withMinioRetry(`listObjectsV2(${prefix})`, async () => {
+        const names: string[] = [];
+        const stream = client.listObjectsV2(minioBucketName, prefix, true);
 
-    for await (const item of stream) {
-        if (item?.name) names.push(item.name);
-    }
+        for await (const item of stream) {
+            if (item?.name) names.push(item.name);
+        }
 
-    return names;
+        return names;
+    });
 }
 
 export async function ensureImageOutputDirExists(userId?: number): Promise<void> {
