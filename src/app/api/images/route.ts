@@ -16,6 +16,7 @@ import {
     uploadBufferToMinioByKey,
     uploadImageToMinio
 } from '@/lib/server/image-storage';
+import { writeImage2RuntimeLog } from '@/lib/server/image2-log';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 // Streaming event types
@@ -116,6 +117,16 @@ function getImageRequestTimeoutMs() {
     }
 
     return DEFAULT_IMAGE_REQUEST_TIMEOUT_MS;
+}
+
+function isSub2ApiImageBridgeEnabled(): boolean {
+    const baseURL = process.env.OPENAI_API_BASE_URL?.trim() || '';
+    return (
+        baseURL.includes('127.0.0.1:3000/v1') ||
+        baseURL.includes('localhost:3000/v1') ||
+        baseURL.includes('127.0.0.1:8080/v1') ||
+        baseURL.includes('localhost:8080/v1')
+    );
 }
 
 function getStringFormValue(value: FormDataEntryValue | null): string | undefined {
@@ -616,6 +627,7 @@ async function persistMinioHistoryMetadata(metadata: PersistedHistoryMetadata, u
 }
 
 async function persistImageApiResult({
+    serverRequestId,
     effectiveStorageMode,
     historyBackground,
     historyHasMask,
@@ -631,8 +643,11 @@ async function persistImageApiResult({
     prompt,
     requestTimestamp,
     result,
-    streaming
+    streaming,
+    inlineResponseImageData,
+    deferServerPersistence
 }: {
+    serverRequestId: string;
     effectiveStorageMode: 'fs' | 'indexeddb' | 'minio';
     historyBackground: PersistedHistoryMetadata['background'];
     historyHasMask: boolean;
@@ -649,11 +664,16 @@ async function persistImageApiResult({
     requestTimestamp: number;
     result: OpenAI.Images.ImagesResponse;
     streaming: boolean;
+    inlineResponseImageData?: boolean;
+    deferServerPersistence?: boolean;
 }): Promise<ImageApiResponseBody> {
     if (!result || !Array.isArray(result.data) || result.data.length === 0) {
         console.error('Invalid or empty data received from OpenAI API:', result);
         throw new Error('Failed to retrieve image data from API.');
     }
+
+    const uploadTasks: Array<Promise<void>> = [];
+    const responseBuildStartedAt = Date.now();
 
     const savedImagesData = await Promise.all(
         result.data.map(async (imageData, index) => {
@@ -680,7 +700,14 @@ async function persistImageApiResult({
                 await fs.writeFile(filepath, buffer);
                 console.log(`Successfully saved image: ${filename}`);
             } else if (effectiveStorageMode === 'minio') {
-                await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
+                const uploadTask = uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension)).then(
+                    () => undefined
+                );
+                if (deferServerPersistence) {
+                    uploadTasks.push(uploadTask);
+                } else {
+                    await uploadTask;
+                }
             }
 
             const revisedPrompt = getRevisedPrompt(imageData);
@@ -688,7 +715,7 @@ async function persistImageApiResult({
                 effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
                     ? buildApiImageUrl(filename, requestTimestamp)
                     : undefined;
-            const shouldInlineImageData = effectiveStorageMode === 'indexeddb';
+            const shouldInlineImageData = effectiveStorageMode === 'indexeddb' || inlineResponseImageData;
             const imageResult: ApiImageResponseItem = {
                 filename,
                 output_format: fileExtension,
@@ -701,10 +728,16 @@ async function persistImageApiResult({
         })
     );
 
-    console.log(`All images processed. Mode: ${effectiveStorageMode}`);
+    console.log('Image API response payload prepared:', {
+        serverRequestId,
+        storageMode: effectiveStorageMode,
+        imageCount: savedImagesData.length,
+        responseBuildMs: Math.max(0, Date.now() - responseBuildStartedAt),
+        deferServerPersistence: Boolean(deferServerPersistence)
+    });
 
     const revisedPrompt = savedImagesData.find((image) => image.revised_prompt)?.revised_prompt;
-    const metadata: PersistedHistoryMetadata = {
+    const buildMetadata = (): PersistedHistoryMetadata => ({
         timestamp: requestTimestamp,
         images: savedImagesData.map((image) => ({
             filename: image.filename,
@@ -728,12 +761,42 @@ async function persistImageApiResult({
         hasMask: historyHasMask,
         output_format: historyOutputFormat,
         model: String(model)
-    };
+    });
 
     if (effectiveStorageMode === 'fs') {
-        await persistFsHistoryMetadata(metadata, image2UserId);
+        await persistFsHistoryMetadata(buildMetadata(), image2UserId);
     } else if (effectiveStorageMode === 'minio') {
-        await persistMinioHistoryMetadata(metadata, image2UserId);
+        const persistMinioAssets = async () => {
+            const uploadStartedAt = Date.now();
+            if (uploadTasks.length > 0) {
+                await Promise.all(uploadTasks);
+            }
+            const uploadDurationMs = Math.max(0, Date.now() - uploadStartedAt);
+            console.log('MinIO image asset persistence completed:', {
+                serverRequestId,
+                imageCount: savedImagesData.length,
+                uploadDurationMs
+            });
+
+            const metadataStartedAt = Date.now();
+            await persistMinioHistoryMetadata(buildMetadata(), image2UserId);
+            console.log('MinIO image history metadata persisted:', {
+                serverRequestId,
+                metadataDurationMs: Math.max(0, Date.now() - metadataStartedAt),
+                totalDurationMs: Math.max(0, Date.now() - requestTimestamp)
+            });
+        };
+
+        if (deferServerPersistence) {
+            void persistMinioAssets().catch((error) => {
+                console.error('Deferred MinIO image persistence failed:', {
+                    serverRequestId,
+                    error
+                });
+            });
+        } else {
+            await persistMinioAssets();
+        }
     }
 
     return {
@@ -847,6 +910,7 @@ function sendImageApiResponseEvents(send: (data: StreamingEvent) => boolean, bod
 export async function POST(request: NextRequest) {
     const serverRequestId = crypto.randomUUID();
     console.log('Received POST request to /api/images:', { serverRequestId });
+    await writeImage2RuntimeLog('api_images_request_start', { serverRequestId, url: request.url });
 
     try {
         const effectiveStorageMode = getImageStorageMode();
@@ -940,7 +1004,8 @@ export async function POST(request: NextRequest) {
         const userAgentHash = sha256(request.headers.get('user-agent') || 'unknown').slice(0, 16);
 
         // Check for streaming mode
-        const streamRequested = formData.get('stream') === 'true';
+        const rawStreamRequested = formData.get('stream') === 'true';
+        const streamRequested = rawStreamRequested && !isSub2ApiImageBridgeEnabled();
         const partialImagesCount = parseInt((formData.get('partial_images') as string) || '2', 10);
 
         let result: OpenAI.Images.ImagesResponse;
@@ -1377,12 +1442,53 @@ export async function POST(request: NextRequest) {
                 return duplicateImageRequestResponse(requestLock.active, serverRequestId, clientRequestId);
             }
             console.log('Calling OpenAI generate with params:', params);
+            if (isSub2ApiImageBridgeEnabled()) {
+                try {
+                    const upstreamStartedAt = Date.now();
+                    result = await openai.images.generate(params);
+                    console.log('OpenAI API call successful.', {
+                        serverRequestId,
+                        upstreamDurationMs: Math.max(0, Date.now() - upstreamStartedAt)
+                    });
+                    await writeImage2RuntimeLog('api_images_generate_upstream_success', {
+                        serverRequestId,
+                        upstreamDurationMs: Math.max(0, Date.now() - upstreamStartedAt),
+                        bridgeMode: true
+                    });
+                    result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
+                    const responseBody = await persistImageApiResult({
+                        serverRequestId,
+                        effectiveStorageMode,
+                        historyBackground,
+                        historyHasMask,
+                        historyModeration,
+                        historyOutputCompression,
+                        historyOutputFormat,
+                        historyQuality,
+                        historySize,
+                        historySourceImageCount,
+                        image2UserId,
+                        mode: 'generate',
+                        model,
+                        prompt,
+                        requestTimestamp,
+                        result,
+                        streaming: false,
+                        inlineResponseImageData: true,
+                        deferServerPersistence: effectiveStorageMode === 'minio'
+                    });
+                    return NextResponse.json(responseBody);
+                } finally {
+                    requestLock.release();
+                }
+            }
             return createSseImageResponse(async (send) => {
                 try {
                     result = await openai.images.generate(params);
                     console.log('OpenAI API call successful.');
                     result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
                     const responseBody = await persistImageApiResult({
+                        serverRequestId,
                         effectiveStorageMode,
                         historyBackground,
                         historyHasMask,
@@ -1850,12 +1956,53 @@ export async function POST(request: NextRequest) {
                 image: `[${imageFiles.map((f) => f.name).join(', ')}]`,
                 mask: maskFile ? maskFile.name : 'N/A'
             });
+            if (isSub2ApiImageBridgeEnabled()) {
+                try {
+                    const upstreamStartedAt = Date.now();
+                    result = await openai.images.edit(params);
+                    console.log('OpenAI API call successful.', {
+                        serverRequestId,
+                        upstreamDurationMs: Math.max(0, Date.now() - upstreamStartedAt)
+                    });
+                    await writeImage2RuntimeLog('api_images_edit_upstream_success', {
+                        serverRequestId,
+                        upstreamDurationMs: Math.max(0, Date.now() - upstreamStartedAt),
+                        bridgeMode: true
+                    });
+                    result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
+                    const responseBody = await persistImageApiResult({
+                        serverRequestId,
+                        effectiveStorageMode,
+                        historyBackground,
+                        historyHasMask,
+                        historyModeration,
+                        historyOutputCompression,
+                        historyOutputFormat,
+                        historyQuality,
+                        historySize,
+                        historySourceImageCount,
+                        image2UserId,
+                        mode: 'edit',
+                        model,
+                        prompt,
+                        requestTimestamp,
+                        result,
+                        streaming: false,
+                        inlineResponseImageData: true,
+                        deferServerPersistence: effectiveStorageMode === 'minio'
+                    });
+                    return NextResponse.json(responseBody);
+                } finally {
+                    requestLock.release();
+                }
+            }
             return createSseImageResponse(async (send) => {
                 try {
                     result = await openai.images.edit(params);
                     console.log('OpenAI API call successful.');
                     result = await fillMissingImages(result, requestedImageCount, requestSingleImage);
                     const responseBody = await persistImageApiResult({
+                        serverRequestId,
                         effectiveStorageMode,
                         historyBackground,
                         historyHasMask,
@@ -1884,6 +2031,10 @@ export async function POST(request: NextRequest) {
 
     } catch (error: unknown) {
         console.error('Error in /api/images:', error);
+        await writeImage2RuntimeLog('api_images_error', {
+            serverRequestId,
+            error: error instanceof Error ? error.message : String(error)
+        });
 
         let errorMessage = 'An unexpected error occurred.';
         let status = 500;

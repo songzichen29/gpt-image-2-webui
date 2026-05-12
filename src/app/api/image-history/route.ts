@@ -11,6 +11,7 @@ import {
     readJsonFromMinio,
     isValidImageFilename
 } from '@/lib/server/image-storage';
+import { writeImage2RuntimeLog } from '@/lib/server/image2-log';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 const imageFilenamePattern = /^(\d+)-(\d+)\.(png|jpe?g|webp)$/i;
@@ -382,6 +383,7 @@ async function loadMinioHistoryItem(timestamp: number, image2UserId?: number): P
 }
 
 export async function GET(request: NextRequest) {
+    const startedAt = Date.now();
     const image2Session = getImage2Session(request);
     const image2UserId = image2Session?.user.id;
 
@@ -411,6 +413,13 @@ export async function GET(request: NextRequest) {
 
         if (storageMode === 'minio') {
             const { items, total } = await loadMinioHistoryPage(request, page, pageSize, image2UserId);
+            await writeImage2RuntimeLog('api_image_history_success', {
+                storageMode,
+                durationMs: Date.now() - startedAt,
+                total,
+                page,
+                pageSize
+            });
             return paginatedResponse(items, total, page, pageSize);
         }
 
@@ -418,9 +427,20 @@ export async function GET(request: NextRequest) {
         const total = history.length;
         const start = (page - 1) * pageSize;
         const items = history.slice(start, start + pageSize);
+        await writeImage2RuntimeLog('api_image_history_success', {
+            storageMode,
+            durationMs: Date.now() - startedAt,
+            total,
+            page,
+            pageSize
+        });
         return paginatedResponse(items, total, page, pageSize);
     } catch (error: unknown) {
         console.error('Error listing image history:', error);
+        await writeImage2RuntimeLog('api_image_history_error', {
+            durationMs: Date.now() - startedAt,
+            error: error instanceof Error ? error.message : String(error)
+        });
         return withNoStore(NextResponse.json({ error: 'Internal server error' }, { status: 500 }));
     }
 }

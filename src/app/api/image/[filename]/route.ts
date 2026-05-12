@@ -2,7 +2,14 @@ import { createReadStream } from 'fs';
 import fs from 'fs/promises';
 import { lookup } from 'mime-types';
 import { NextRequest, NextResponse } from 'next/server';
-import { getImageFilePath, getImageStorageMode, getMinioImageBuffer, isValidImageFilename } from '@/lib/server/image-storage';
+import {
+    getImageFilePath,
+    getImageStorageMode,
+    getMinioImageBuffer,
+    getMinioPresignedImageUrl,
+    isValidImageFilename
+} from '@/lib/server/image-storage';
+import { writeImage2RuntimeLog } from '@/lib/server/image2-log';
 import { getImage2Session, isSub2ApiSsoEnabled, unauthorizedImage2Response } from '@/lib/server/sub2api-auth';
 
 function detectImageContentType(buffer: Buffer, filename: string): string {
@@ -33,6 +40,7 @@ const imageResponseHeaders = {
 };
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
+    const startedAt = Date.now();
     const { filename } = await params;
 
     if (!isValidImageFilename(filename)) {
@@ -47,6 +55,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     try {
         if (getImageStorageMode() === 'minio') {
+            const presignedUrl = await getMinioPresignedImageUrl(filename, image2UserId);
+            if (presignedUrl) {
+                await writeImage2RuntimeLog('api_image_redirect_presigned', {
+                    filename,
+                    durationMs: Date.now() - startedAt
+                });
+                return NextResponse.redirect(presignedUrl, {
+                    status: 307,
+                    headers: imageResponseHeaders
+                });
+            }
+
             const buffer = await getMinioImageBuffer(filename, image2UserId);
             if (!buffer) {
                 return NextResponse.json({ error: 'Image not found' }, { status: 404 });
@@ -86,6 +106,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         });
     } catch (error: unknown) {
         console.error(`Error serving image ${filename}:`, error);
+        await writeImage2RuntimeLog('api_image_error', {
+            filename,
+            durationMs: Date.now() - startedAt,
+            error: error instanceof Error ? error.message : String(error)
+        });
         if (
             typeof error === 'object' &&
             error !== null &&
