@@ -182,7 +182,8 @@ export default function HistoryDetailPage() {
             }
 
             if (storageMode === 'fs' || storageMode === 'minio') {
-                nextSrcByFilename[imageInfo.filename] = buildApiImageUrl(imageInfo.filename, item.timestamp);
+                nextSrcByFilename[imageInfo.filename] =
+                    imageInfo.path || buildApiImageUrl(imageInfo.filename, item.timestamp);
             }
         });
 

@@ -29,6 +29,7 @@ import * as React from 'react';
 
 type HistoryImage = {
     filename: string;
+    path?: string;
 };
 
 export type HistoryMetadata = {
@@ -569,7 +570,7 @@ export default function HomePage() {
             item.images.map((image) => ({
                 filename: image.filename,
                 output_format: item.output_format || getOutputFormatFromFilename(image.filename),
-                path: buildApiImageUrl(image.filename, item.timestamp)
+                path: image.path || buildApiImageUrl(image.filename, item.timestamp)
             })),
         [getOutputFormatFromFilename]
     );
@@ -1111,7 +1112,8 @@ export default function HomePage() {
                     const newHistoryEntry: HistoryMetadata = {
                         timestamp: batchTimestamp,
                         images: finalImages.map((img) => ({
-                            filename: img.filename
+                            filename: img.filename,
+                            ...(img.path ? { path: img.path } : {})
                         })),
                         status: 'completed',
                         storageModeUsed: effectiveStorageModeClient,
@@ -1318,7 +1320,8 @@ export default function HomePage() {
                 const newHistoryEntry: HistoryMetadata = {
                     timestamp: batchTimestamp,
                     images: result.images.map((img) => ({
-                        filename: img.filename
+                        filename: img.filename,
+                        ...(img.path ? { path: img.path } : {})
                     })),
                     status: 'completed',
                     storageModeUsed: effectiveStorageModeClient,

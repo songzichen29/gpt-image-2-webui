@@ -59,6 +59,35 @@ export function getImageObjectKey(filename: string, userId?: number): string {
     return path.posix.join(userId ? String(userId) : 'legacy', filename);
 }
 
+function joinUrlPath(baseUrl: string, objectKey: string): string {
+    const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+    const encodedObjectKey = objectKey
+        .split('/')
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join('/');
+
+    return `${normalizedBaseUrl}/${encodedObjectKey}`;
+}
+
+export function buildPublicMinioObjectUrl(objectKey: string): string | null {
+    const publicBaseUrl = process.env.MINIO_PUBLIC_BASE_URL?.trim();
+    if (publicBaseUrl) {
+        return joinUrlPath(publicBaseUrl, objectKey);
+    }
+
+    const serverUrl = process.env.MINIO_SERVER_URL?.trim();
+    if (!serverUrl) {
+        return null;
+    }
+
+    return joinUrlPath(`${serverUrl.replace(/\/+$/, '')}/${minioBucketName}`, objectKey);
+}
+
+export function buildPublicMinioImageUrl(filename: string, userId?: number): string | null {
+    return buildPublicMinioObjectUrl(getImageObjectKey(filename, userId));
+}
+
 export function getImageHistoryObjectKey(timestamp: number, userId?: number): string {
     return path.posix.join(userId ? String(userId) : 'legacy', '.history', `${timestamp}.json`);
 }
@@ -273,11 +302,14 @@ export async function readJsonFromMinio<T>(objectKey: string): Promise<T | null>
 }
 
 export async function getMinioImageBuffer(filename: string, userId?: number): Promise<Buffer | null> {
+    return getMinioObjectBufferByKey(getImageObjectKey(filename, userId));
+}
+
+export async function getMinioObjectBufferByKey(objectKey: string): Promise<Buffer | null> {
     const client = getMinioClient();
     if (!client) return null;
 
     await ensureMinioBucketExists();
-    const objectKey = getImageObjectKey(filename, userId);
 
     return withMinioRetry(`getObject(image:${objectKey})`, async () => {
         let stream;

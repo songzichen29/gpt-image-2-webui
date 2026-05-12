@@ -21,7 +21,7 @@ const maxPageSize = 1000;
 
 type ImageHistoryItem = {
     timestamp: number;
-    images: Array<{ filename: string }>;
+    images: Array<{ filename: string; path?: string }>;
     status: 'completed';
     storageModeUsed: 'fs' | 'minio';
     durationMs: number;
@@ -178,7 +178,10 @@ function normalizeHistoryItem(value: unknown, timestamp: number): ImageHistoryIt
     return {
         timestamp: source.timestamp,
         images: source.images
-            .map((image) => ({ filename: image.filename }))
+            .map((image) => ({
+                filename: image.filename,
+                ...(typeof image.path === 'string' && image.path ? { path: image.path } : {})
+            }))
             .filter((image) => typeof image.filename === 'string' && image.filename),
         status: 'completed',
         storageModeUsed: source.storageModeUsed === 'minio' ? 'minio' : 'fs',

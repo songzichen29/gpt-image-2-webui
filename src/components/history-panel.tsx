@@ -242,7 +242,7 @@ function HistoryPanelImpl({
                                     src:
                                         getImageSrc(imageInfo.filename) ??
                                         (isServerStorage && isImageCacheReady
-                                            ? buildApiImageUrl(imageInfo.filename, item.timestamp)
+                                            ? imageInfo.path || buildApiImageUrl(imageInfo.filename, item.timestamp)
                                             : undefined)
                                 }));
                             const firstPreview = imagePreviews[0];

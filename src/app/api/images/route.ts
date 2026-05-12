@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { buildApiImageUrl } from '@/lib/image-url';
 import {
+    buildPublicMinioImageUrl,
     ensureImageHistoryMetaDirExists,
     ensureImageOutputDirExists,
     getImageMaskObjectKey,
@@ -56,6 +57,7 @@ type ImageApiResponseBody = {
 
 type PersistedHistoryImage = {
     filename: string;
+    path?: string;
     revisedPrompt?: string;
 };
 
@@ -613,6 +615,23 @@ function toCostDetails(usage: OpenAI.Images.ImagesResponse['usage'] | undefined)
     };
 }
 
+function buildStoredImageUrl(
+    storageMode: 'fs' | 'indexeddb' | 'minio',
+    filename: string,
+    timestamp: number,
+    userId?: number
+): string | undefined {
+    if (storageMode === 'minio') {
+        return buildPublicMinioImageUrl(filename, userId) ?? buildApiImageUrl(filename, timestamp);
+    }
+
+    if (storageMode === 'fs') {
+        return buildApiImageUrl(filename, timestamp);
+    }
+
+    return undefined;
+}
+
 async function persistFsHistoryMetadata(
     metadata: PersistedHistoryMetadata,
     userId?: number
@@ -711,10 +730,7 @@ async function persistImageApiResult({
             }
 
             const revisedPrompt = getRevisedPrompt(imageData);
-            const imagePath =
-                effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
-                    ? buildApiImageUrl(filename, requestTimestamp)
-                    : undefined;
+            const imagePath = buildStoredImageUrl(effectiveStorageMode, filename, requestTimestamp, image2UserId);
             const shouldInlineImageData = effectiveStorageMode === 'indexeddb' || inlineResponseImageData;
             const imageResult: ApiImageResponseItem = {
                 filename,
@@ -741,6 +757,7 @@ async function persistImageApiResult({
         timestamp: requestTimestamp,
         images: savedImagesData.map((image) => ({
             filename: image.filename,
+            ...(image.path ? { path: image.path } : {}),
             ...(image.revised_prompt ? { revisedPrompt: image.revised_prompt } : {})
         })),
         status: 'completed',
@@ -1241,10 +1258,12 @@ export async function POST(request: NextRequest) {
                                         await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                     }
 
-                                    const savedPath =
-                                        effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
-                                            ? buildApiImageUrl(filename, timestamp)
-                                            : undefined;
+                                    const savedPath = buildStoredImageUrl(
+                                        effectiveStorageMode,
+                                        filename,
+                                        timestamp,
+                                        image2UserId
+                                    );
                                     const imageData = {
                                         filename,
                                         output_format: fileExtension,
@@ -1288,10 +1307,12 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath =
-                                    effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
-                                        ? buildApiImageUrl(filename, timestamp)
-                                        : undefined;
+                                const savedPath = buildStoredImageUrl(
+                                    effectiveStorageMode,
+                                    filename,
+                                    timestamp,
+                                    image2UserId
+                                );
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,
@@ -1323,7 +1344,8 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename
+                                                filename: image.filename,
+                                                ...(image.path ? { path: image.path } : {})
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'fs',
@@ -1354,7 +1376,8 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename
+                                                filename: image.filename,
+                                                ...(image.path ? { path: image.path } : {})
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'minio',
@@ -1754,10 +1777,12 @@ export async function POST(request: NextRequest) {
                                         await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                     }
 
-                                    const savedPath =
-                                        effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
-                                            ? buildApiImageUrl(filename, timestamp)
-                                            : undefined;
+                                    const savedPath = buildStoredImageUrl(
+                                        effectiveStorageMode,
+                                        filename,
+                                        timestamp,
+                                        image2UserId
+                                    );
                                     const imageData = {
                                         filename,
                                         output_format: fileExtension,
@@ -1801,10 +1826,12 @@ export async function POST(request: NextRequest) {
                                     await uploadImageToMinio(filename, buffer, image2UserId, getOutputMimeType(fileExtension));
                                 }
 
-                                const savedPath =
-                                    effectiveStorageMode === 'fs' || effectiveStorageMode === 'minio'
-                                        ? buildApiImageUrl(filename, timestamp)
-                                        : undefined;
+                                const savedPath = buildStoredImageUrl(
+                                    effectiveStorageMode,
+                                    filename,
+                                    timestamp,
+                                    image2UserId
+                                );
                                 completedImages.push({
                                     filename,
                                     output_format: fileExtension,
@@ -1836,7 +1863,8 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename
+                                                filename: image.filename,
+                                                ...(image.path ? { path: image.path } : {})
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'fs',
@@ -1863,7 +1891,8 @@ export async function POST(request: NextRequest) {
                                         {
                                             timestamp,
                                             images: completedImages.map((image) => ({
-                                                filename: image.filename
+                                                filename: image.filename,
+                                                ...(image.path ? { path: image.path } : {})
                                             })),
                                             status: 'completed',
                                             storageModeUsed: 'minio',
