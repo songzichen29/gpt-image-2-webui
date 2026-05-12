@@ -10,7 +10,7 @@ import {
     DialogTitle
 } from '@/components/ui/dialog';
 import { useI18n } from '@/lib/i18n';
-import { ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
 import Image from 'next/image';
 import * as React from 'react';
 
@@ -30,6 +30,15 @@ type ImagePreviewDialogProps = {
     onNext?: () => void;
 };
 
+const minZoom = 0.5;
+const maxZoom = 6;
+const defaultZoom = 1;
+const zoomStep = 0.2;
+
+function clampZoom(value: number): number {
+    return Math.min(maxZoom, Math.max(minZoom, value));
+}
+
 export function ImagePreviewDialog({
     image,
     open,
@@ -40,25 +49,96 @@ export function ImagePreviewDialog({
     onNext
 }: ImagePreviewDialogProps) {
     const { t } = useI18n();
-    const [isZoomed, setIsZoomed] = React.useState(false);
+    const [zoom, setZoom] = React.useState(defaultZoom);
+    const [pan, setPan] = React.useState({ x: 0, y: 0 });
     const hasMultipleImages = typeof totalCount === 'number' && totalCount > 1;
+    const viewportRef = React.useRef<HTMLDivElement>(null);
     const touchStartXRef = React.useRef<number | null>(null);
     const touchStartYRef = React.useRef<number | null>(null);
     const swipeHandledRef = React.useRef(false);
+    const dragStartRef = React.useRef<{
+        pointerId: number;
+        startX: number;
+        startY: number;
+        panX: number;
+        panY: number;
+    } | null>(null);
+    const hasDraggedRef = React.useRef(false);
+    const isZoomed = zoom > 1.01;
+
+    const resetView = React.useCallback(() => {
+        setZoom(defaultZoom);
+        setPan({ x: 0, y: 0 });
+    }, []);
+
+    const updateZoom = React.useCallback((nextZoom: number, origin?: { x: number; y: number }) => {
+        const clampedZoom = clampZoom(nextZoom);
+
+        setZoom((currentZoom) => {
+            const safeCurrentZoom = currentZoom || defaultZoom;
+            const viewport = viewportRef.current;
+
+            if (!origin || !viewport) {
+                if (clampedZoom <= defaultZoom) {
+                    setPan({ x: 0, y: 0 });
+                }
+
+                return clampedZoom;
+            }
+
+            const rect = viewport.getBoundingClientRect();
+            const viewportCenterX = rect.left + rect.width / 2;
+            const viewportCenterY = rect.top + rect.height / 2;
+            const originOffsetX = origin.x - viewportCenterX;
+            const originOffsetY = origin.y - viewportCenterY;
+            const scaleRatio = clampedZoom / safeCurrentZoom;
+
+            setPan((currentPan) => {
+                if (clampedZoom <= defaultZoom) {
+                    return { x: 0, y: 0 };
+                }
+
+                return {
+                    x: originOffsetX - (originOffsetX - currentPan.x) * scaleRatio,
+                    y: originOffsetY - (originOffsetY - currentPan.y) * scaleRatio
+                };
+            });
+
+            return clampedZoom;
+        });
+    }, []);
 
     React.useEffect(() => {
-        if (!open) {
-            setIsZoomed(false);
-            touchStartXRef.current = null;
-            touchStartYRef.current = null;
-            swipeHandledRef.current = false;
-        }
-    }, [image?.src, open]);
+        resetView();
+        touchStartXRef.current = null;
+        touchStartYRef.current = null;
+        swipeHandledRef.current = false;
+        dragStartRef.current = null;
+        hasDraggedRef.current = false;
+    }, [image?.src, open, resetView]);
 
     React.useEffect(() => {
         if (!open) return;
 
         const handleKeyDown = (event: KeyboardEvent) => {
+            if ((event.ctrlKey || event.metaKey) && (event.key === '+' || event.key === '=')) {
+                event.preventDefault();
+                updateZoom(zoom + zoomStep);
+                return;
+            }
+
+            if ((event.ctrlKey || event.metaKey) && event.key === '-') {
+                event.preventDefault();
+                updateZoom(zoom - zoomStep);
+                return;
+            }
+
+            if ((event.ctrlKey || event.metaKey) && event.key === '0') {
+                event.preventDefault();
+                resetView();
+                return;
+            }
+
             if (event.key === 'ArrowLeft' && hasMultipleImages && onPrevious) {
                 event.preventDefault();
                 onPrevious();
@@ -72,17 +152,78 @@ export function ImagePreviewDialog({
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [hasMultipleImages, onNext, onPrevious, open]);
+    }, [hasMultipleImages, onNext, onPrevious, open, resetView, updateZoom, zoom]);
 
-    const handleTouchStart = (event: React.TouchEvent<HTMLButtonElement>) => {
+    const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const delta = event.deltaY > 0 ? -zoomStep : zoomStep;
+        const multiplier = event.ctrlKey || event.metaKey ? 1.6 : 1;
+        updateZoom(zoom + delta * multiplier, { x: event.clientX, y: event.clientY });
+    };
+
+    const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.button !== 0) return;
+
+        hasDraggedRef.current = false;
+        dragStartRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            panX: pan.x,
+            panY: pan.y
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+    const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        const dragStart = dragStartRef.current;
+        if (!dragStart || dragStart.pointerId !== event.pointerId || !isZoomed) {
+            return;
+        }
+
+        const deltaX = event.clientX - dragStart.startX;
+        const deltaY = event.clientY - dragStart.startY;
+        if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+            hasDraggedRef.current = true;
+        }
+        setPan({
+            x: dragStart.panX + deltaX,
+            y: dragStart.panY + deltaY
+        });
+    };
+
+    const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (dragStartRef.current?.pointerId === event.pointerId) {
+            dragStartRef.current = null;
+        }
+
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+    };
+
+    const handlePreviewDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+
+        if (isZoomed) {
+            resetView();
+            return;
+        }
+
+        updateZoom(2, { x: event.clientX, y: event.clientY });
+    };
+
+    const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
         const touch = event.touches[0];
         touchStartXRef.current = touch.clientX;
         touchStartYRef.current = touch.clientY;
         swipeHandledRef.current = false;
     };
 
-    const handleTouchMove = (event: React.TouchEvent<HTMLButtonElement>) => {
-        if (!hasMultipleImages || !onPrevious || !onNext || swipeHandledRef.current) {
+    const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+        if (isZoomed || !hasMultipleImages || !onPrevious || !onNext || swipeHandledRef.current) {
             return;
         }
 
@@ -125,40 +266,98 @@ export function ImagePreviewDialog({
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className='max-h-[92vh] border-neutral-700 bg-neutral-950 p-4 text-white sm:max-w-[92vw]'>
                 <DialogHeader className='pr-8'>
-                    <DialogTitle className='truncate text-white'>
-                        {image?.filename || t('output.previewTitle')}
-                    </DialogTitle>
-                    <DialogDescription className='sr-only'>{t('output.previewDescription')}</DialogDescription>
+                    <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
+                        <div className='min-w-0'>
+                            <DialogTitle className='truncate text-white'>
+                                {image?.filename || t('output.previewTitle')}
+                            </DialogTitle>
+                            <DialogDescription className='sr-only'>{t('output.previewDescription')}</DialogDescription>
+                        </div>
+                        {image && (
+                            <div className='flex shrink-0 items-center gap-1.5'>
+                                <button
+                                    type='button'
+                                    onClick={() => updateZoom(isZoomed ? defaultZoom : 2)}
+                                    className='rounded-full border border-white/15 bg-white/10 px-2.5 py-1 text-xs text-white/80 transition hover:bg-white/15 hover:text-white'
+                                    aria-label={t(isZoomed ? 'output.zoomOutImageAria' : 'output.zoomInImageAria', {
+                                        filename: image.filename
+                                    })}>
+                                    {Math.round(zoom * 100)}%
+                                </button>
+                                <Button
+                                    type='button'
+                                    variant='ghost'
+                                    size='icon'
+                                    onClick={() => updateZoom(zoom - zoomStep)}
+                                    className='h-8 w-8 rounded-full bg-white/10 text-white/80 hover:bg-white/15 hover:text-white'
+                                    aria-label={t('output.zoomOutImageAria', { filename: image.filename })}>
+                                    <ZoomOut className='h-4 w-4' />
+                                </Button>
+                                <Button
+                                    type='button'
+                                    variant='ghost'
+                                    size='icon'
+                                    onClick={() => updateZoom(zoom + zoomStep)}
+                                    className='h-8 w-8 rounded-full bg-white/10 text-white/80 hover:bg-white/15 hover:text-white'
+                                    aria-label={t('output.zoomInImageAria', { filename: image.filename })}>
+                                    <ZoomIn className='h-4 w-4' />
+                                </Button>
+                                <Button
+                                    type='button'
+                                    variant='ghost'
+                                    size='icon'
+                                    onClick={resetView}
+                                    className='h-8 w-8 rounded-full bg-white/10 text-white/80 hover:bg-white/15 hover:text-white'
+                                    aria-label={t('output.resetPreviewAria')}>
+                                    <RotateCcw className='h-4 w-4' />
+                                </Button>
+                            </div>
+                        )}
+                    </div>
                 </DialogHeader>
                 {image && (
                     <div className='relative h-[70vh] min-h-[320px] w-full'>
-                        <button
-                            type='button'
-                            onClick={() => setIsZoomed((current) => !current)}
+                        <div
+                            ref={viewportRef}
+                            role='button'
+                            tabIndex={0}
+                            onWheel={handleWheel}
+                            onPointerDown={handlePointerDown}
+                            onPointerMove={handlePointerMove}
+                            onPointerUp={handlePointerUp}
+                            onPointerCancel={handlePointerUp}
+                            onDoubleClick={handlePreviewDoubleClick}
                             onTouchStart={handleTouchStart}
                             onTouchMove={handleTouchMove}
                             onTouchEnd={handleTouchEnd}
-                            className='relative h-full w-full overflow-auto rounded-md bg-black text-left'
+                            className={`relative h-full w-full touch-none select-none overflow-hidden rounded-md bg-black text-left ${
+                                isZoomed ? 'cursor-grab active:cursor-grabbing' : 'cursor-zoom-in'
+                            }`}
                             aria-label={t(isZoomed ? 'output.zoomOutImageAria' : 'output.zoomInImageAria', {
                                 filename: image.filename
                             })}>
                             <div
-                                className={`relative flex min-h-full min-w-full items-center justify-center ${
-                                    isZoomed ? 'h-max w-max' : 'h-full w-full'
-                                }`}>
+                                className='relative flex h-full w-full items-center justify-center'
+                                style={{
+                                    transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+                                    transformOrigin: 'center center',
+                                    transition: dragStartRef.current ? 'none' : 'transform 120ms ease-out'
+                                }}>
                                 <Image
                                     src={image.src}
                                     alt={image.alt || image.filename}
                                     width={1600}
                                     height={1600}
-                                    className={
-                                        isZoomed ? 'h-auto max-w-none object-contain' : 'h-full w-full object-contain'
-                                    }
+                                    className='h-full w-full object-contain'
+                                    draggable={false}
                                     sizes='92vw'
                                     unoptimized
                                 />
                             </div>
-                        </button>
+                            <div className='pointer-events-none absolute right-3 bottom-3 rounded-full bg-black/70 px-2.5 py-1 text-[11px] text-white/65'>
+                                {t('output.previewControlsHint')}
+                            </div>
+                        </div>
 
                         {hasMultipleImages && onPrevious && onNext && (
                             <>

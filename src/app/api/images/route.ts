@@ -892,7 +892,8 @@ function sendImageApiResponseEvents(send: (data: StreamingEvent) => boolean, bod
                 b64_json: image.b64_json,
                 path: image.path,
                 output_format: image.output_format,
-                revised_prompt: image.revised_prompt
+                revised_prompt: image.revised_prompt,
+                usage: index === body.images.length - 1 ? body.usage : undefined
             })
         ) {
             return;
@@ -962,6 +963,7 @@ export async function POST(request: NextRequest) {
         const openai = new OpenAI({
             apiKey,
             baseURL: baseURL || undefined,
+            maxRetries: 0,
             timeout: imageRequestTimeoutMs,
             defaultHeaders: {
                 'Accept-Language': acceptLanguage
